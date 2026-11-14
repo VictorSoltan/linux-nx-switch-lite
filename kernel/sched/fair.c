@@ -8799,6 +8799,44 @@ static inline bool asym_fits_cpu(unsigned long util,
 /*
  * Try and locate an idle core/thread in the LLC cache domain.
  */
+/*
+ * Local (Switch: four A57 cores, one LLC, no SMT).  No idle CPU was found for a waking
+ * task that is heavier than nice 0 -- a game thread the application put above normal
+ * (Wine maps those to nice -10..-19).  If @target runs an equally heavy task, or a
+ * non-fair one, the wakee would wait there while another CPU of the LLC runs only
+ * lighter work: a nice-0 worker, a background process.  Pick the CPU whose single
+ * running fair task is the lightest; the wakeup then preempts that task.  This is
+ * what the Windows dispatcher does for a ready thread (it preempts a lower-priority
+ * thread on another processor), and what the games expect.  Lockless reads of remote
+ * rq->curr, as select_idle_*() do: a stale answer only costs a worse placement.
+ */
+static int select_lighter_cpu(struct task_struct *p, struct sched_domain *sd, int target)
+{
+	unsigned long w = p->se.load.weight, best_w = w;
+	struct task_struct *curr;
+	int cpu, best = -1;
+
+	if (!sched_feat(SIS_LIGHTER) || w <= NICE_0_LOAD || p->nr_cpus_allowed == 1)
+		return -1;
+
+	curr = rcu_dereference_all(cpu_rq(target)->curr);
+	if (curr->sched_class == &fair_sched_class ? curr->se.load.weight < w : is_idle_task(curr))
+		return -1;
+
+	for_each_cpu_and(cpu, sched_domain_span(sd), p->cpus_ptr) {
+		struct rq *rq = cpu_rq(cpu);
+
+		if (cpu == target || READ_ONCE(rq->nr_running) != 1)
+			continue;
+		curr = rcu_dereference_all(rq->curr);
+		if (curr->sched_class != &fair_sched_class || curr->se.load.weight >= best_w)
+			continue;
+		best = cpu;
+		best_w = curr->se.load.weight;
+	}
+	return best;
+}
+
 static int select_idle_sibling(struct task_struct *p, int prev, int target)
 {
 	bool has_idle_core = false;
@@ -8922,6 +8960,10 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		return prev_aff;
 	if ((unsigned int)recent_used_cpu < nr_cpumask_bits)
 		return recent_used_cpu;
+
+	i = select_lighter_cpu(p, sd, target);
+	if (i >= 0)
+		return i;
 
 	return target;
 }

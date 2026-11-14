@@ -173,17 +173,20 @@ gm20b_b01_volt_new(struct nvkm_device *device, enum nvkm_subdev_type type, int i
 		return -ENOMEM;
 	*pvolt = &volt->base;
 
-	vmin = speedo_to_vmin[tdev->gpu_speedo_id];
+	/* C1 NA DVFS, paired with the B01 clock path. Keep the board's
+	 * EMC2533 rail floor; the original T210 PLL floors do not apply.
+	 */
+	vmin = 650000;
 
 	switch (tdev->gpu_speedo_id) {
 		case 3: /* HIOPT table */
-			return gk20a_volt_ctor(device, type, inst, gm20b_b01_na_cvb_hiopt_coef,
-						ARRAY_SIZE(gm20b_b01_na_cvb_hiopt_coef), vmin, volt);
+			return gk20a_volt_ctor_b01(device, type, inst, gm20b_b01_na_cvb_hiopt_coef,
+						ARRAY_SIZE(gm20b_b01_na_cvb_hiopt_coef), vmin, 150, volt);
 		case 2: /* SLT table */
-			return gk20a_volt_ctor(device, type, inst, gm20b_b01_na_cvb_slt_coef,
-						ARRAY_SIZE(gm20b_b01_na_cvb_slt_coef), vmin, volt);
+			return gk20a_volt_ctor_b01(device, type, inst, gm20b_b01_na_cvb_slt_coef,
+						ARRAY_SIZE(gm20b_b01_na_cvb_slt_coef), vmin, 10, volt);
 		default:
-			return gk20a_volt_ctor(device, type, inst, gm20b_b01_na_cvb_coef,
-						ARRAY_SIZE(gm20b_b01_na_cvb_coef), vmin, volt);
+			return gk20a_volt_ctor_b01(device, type, inst, gm20b_b01_na_cvb_coef,
+						ARRAY_SIZE(gm20b_b01_na_cvb_coef), vmin, 10, volt);
 	}
 }

@@ -126,6 +126,61 @@ static const struct tegra_tsensor_group tegra210_tsensor_group_mem = {
 	.thermctl_lvl0_dn_thresh_mask = TEGRA210_THERMCTL_LVL0_DN_THRESH_MASK,
 };
 
+static const struct tegra_tsensor_group tegra210b01_tsensor_group_cpu = {
+	.id = TEGRA124_SOCTHERM_SENSOR_CPU,
+	.name = "cpu",
+	.sensor_temp_offset = SENSOR_TEMP1,
+	.sensor_temp_mask = SENSOR_TEMP1_CPU_TEMP_MASK,
+	.pdiv = 12,
+	.pdiv_ate = 6,
+	.pdiv_mask = SENSOR_PDIV_CPU_MASK,
+	.pllx_hotspot_diff = 10,
+	.pllx_hotspot_mask = SENSOR_HOTSPOT_CPU_MASK,
+	.thermtrip_any_en_mask = TEGRA210_THERMTRIP_ANY_EN_MASK,
+	.thermtrip_enable_mask = TEGRA210_THERMTRIP_CPU_EN_MASK,
+	.thermtrip_threshold_mask = TEGRA210_THERMTRIP_CPU_THRESH_MASK,
+	.thermctl_isr_mask = THERM_IRQ_CPU_MASK,
+	.thermctl_lvl0_offset = THERMCTL_LEVEL0_GROUP_CPU,
+	.thermctl_lvl0_up_thresh_mask = TEGRA210_THERMCTL_LVL0_UP_THRESH_MASK,
+	.thermctl_lvl0_dn_thresh_mask = TEGRA210_THERMCTL_LVL0_DN_THRESH_MASK,
+};
+
+static const struct tegra_tsensor_group tegra210b01_tsensor_group_gpu = {
+	.id = TEGRA124_SOCTHERM_SENSOR_GPU,
+	.name = "gpu",
+	.sensor_temp_offset = SENSOR_TEMP1,
+	.sensor_temp_mask = SENSOR_TEMP1_GPU_TEMP_MASK,
+	.pdiv = 12,
+	.pdiv_ate = 6,
+	.pdiv_mask = SENSOR_PDIV_GPU_MASK,
+	.pllx_hotspot_diff = 5,
+	.pllx_hotspot_mask = SENSOR_HOTSPOT_GPU_MASK,
+	.thermtrip_any_en_mask = TEGRA210_THERMTRIP_ANY_EN_MASK,
+	.thermtrip_enable_mask = TEGRA210_THERMTRIP_GPU_EN_MASK,
+	.thermtrip_threshold_mask = TEGRA210_THERMTRIP_GPUMEM_THRESH_MASK,
+	.thermctl_isr_mask = THERM_IRQ_GPU_MASK,
+	.thermctl_lvl0_offset = THERMCTL_LEVEL0_GROUP_GPU,
+	.thermctl_lvl0_up_thresh_mask = TEGRA210_THERMCTL_LVL0_UP_THRESH_MASK,
+	.thermctl_lvl0_dn_thresh_mask = TEGRA210_THERMCTL_LVL0_DN_THRESH_MASK,
+};
+
+static const struct tegra_tsensor_group tegra210b01_tsensor_group_pll = {
+	.id = TEGRA124_SOCTHERM_SENSOR_PLLX,
+	.name = "pll",
+	.sensor_temp_offset = SENSOR_TEMP2,
+	.sensor_temp_mask = SENSOR_TEMP2_PLLX_TEMP_MASK,
+	.pdiv = 12,
+	.pdiv_ate = 6,
+	.pdiv_mask = SENSOR_PDIV_PLLX_MASK,
+	.thermtrip_any_en_mask = TEGRA210_THERMTRIP_ANY_EN_MASK,
+	.thermtrip_enable_mask = TEGRA210_THERMTRIP_TSENSE_EN_MASK,
+	.thermtrip_threshold_mask = TEGRA210_THERMTRIP_TSENSE_THRESH_MASK,
+	.thermctl_isr_mask = THERM_IRQ_TSENSE_MASK,
+	.thermctl_lvl0_offset = THERMCTL_LEVEL0_GROUP_TSENSE,
+	.thermctl_lvl0_up_thresh_mask = TEGRA210_THERMCTL_LVL0_UP_THRESH_MASK,
+	.thermctl_lvl0_dn_thresh_mask = TEGRA210_THERMCTL_LVL0_DN_THRESH_MASK,
+};
+
 static const struct tegra_tsensor_group *tegra210_tsensor_groups[] = {
 	&tegra210_tsensor_group_cpu,
 	&tegra210_tsensor_group_gpu,
@@ -134,9 +189,9 @@ static const struct tegra_tsensor_group *tegra210_tsensor_groups[] = {
 };
 
 static const struct tegra_tsensor_group *tegra210b01_tsensor_groups[] = {
-	&tegra210_tsensor_group_cpu,
-	&tegra210_tsensor_group_gpu,
-	&tegra210_tsensor_group_pll,
+	&tegra210b01_tsensor_group_cpu,
+	&tegra210b01_tsensor_group_gpu,
+	&tegra210b01_tsensor_group_pll,
 };
 
 static const struct tegra_tsensor tegra210_tsensors[] = {
@@ -211,51 +266,51 @@ static const struct tegra_tsensor tegra210b01_tsensors[] = {
 	{
 		.name = "cpu0",
 		.base = 0xc0,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x098,
 		.fuse_corr_alpha = 1085000,
 		.fuse_corr_beta = 3244200,
-		.group = &tegra210_tsensor_group_cpu,
+		.group = &tegra210b01_tsensor_group_cpu,
 	}, {
 		.name = "cpu1",
 		.base = 0xe0,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x084,
 		.fuse_corr_alpha = 1126200,
 		.fuse_corr_beta = -67500,
-		.group = &tegra210_tsensor_group_cpu,
+		.group = &tegra210b01_tsensor_group_cpu,
 	}, {
 		.name = "cpu2",
 		.base = 0x100,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x088,
 		.fuse_corr_alpha = 1098400,
 		.fuse_corr_beta = 2251100,
-		.group = &tegra210_tsensor_group_cpu,
+		.group = &tegra210b01_tsensor_group_cpu,
 	}, {
 		.name = "cpu3",
 		.base = 0x120,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x12c,
 		.fuse_corr_alpha = 1108000,
 		.fuse_corr_beta = 602700,
-		.group = &tegra210_tsensor_group_cpu,
+		.group = &tegra210b01_tsensor_group_cpu,
 	}, {
 		.name = "gpu",
 		.base = 0x180,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x154,
 		.fuse_corr_alpha = 1074300,
 		.fuse_corr_beta = 2734900,
-		.group = &tegra210_tsensor_group_gpu,
+		.group = &tegra210b01_tsensor_group_gpu,
 	}, {
 		.name = "pllx",
 		.base = 0x1a0,
-		.config = &tegra210_tsensor_config,
+		.config = &tegra210b01_tsensor_config,
 		.calib_fuse_offset = 0x160,
 		.fuse_corr_alpha = 1039700,
 		.fuse_corr_beta = 6829100,
-		.group = &tegra210_tsensor_group_pll,
+		.group = &tegra210b01_tsensor_group_pll,
 	},
 };
 

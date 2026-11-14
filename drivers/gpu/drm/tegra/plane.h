@@ -52,6 +52,7 @@ struct tegra_plane_state {
 
 	bool reflect_x;
 	bool reflect_y;
+	bool transpose;
 
 	/* used for legacy blending support only */
 	struct tegra_plane_legacy_blending_state blending[2];

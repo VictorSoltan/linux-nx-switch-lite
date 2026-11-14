@@ -342,8 +342,14 @@ gf100_gr_chan_bind(struct nvkm_object *object, struct nvkm_gpuobj *parent,
 		nvkm_wo32(*pgpuobj, 0x10, chan->mmio_nr / 2);
 		nvkm_wo32(*pgpuobj, 0x14, lower_32_bits(chan->mmio_vma->addr));
 		nvkm_wo32(*pgpuobj, 0x18, upper_32_bits(chan->mmio_vma->addr));
-		nvkm_wo32(*pgpuobj, 0x1c, 1);
-		nvkm_wo32(*pgpuobj, 0x20, 0);
+		if (chan->zcull_vma) {
+			/* ZCULL ctxsw: separate buffer (nvgpu mode 2). */
+			nvkm_wo32(*pgpuobj, 0x1c, 2);
+			nvkm_wo32(*pgpuobj, 0x20, lower_32_bits(chan->zcull_vma->addr >> 8));
+		} else {
+			nvkm_wo32(*pgpuobj, 0x1c, 1);
+			nvkm_wo32(*pgpuobj, 0x20, 0);
+		}
 		nvkm_wo32(*pgpuobj, 0x28, 0);
 		nvkm_wo32(*pgpuobj, 0x2c, 0);
 	}
@@ -358,6 +364,9 @@ gf100_gr_chan_dtor(struct nvkm_object *object)
 
 	nvkm_vmm_put(chan->vmm, &chan->mmio_vma);
 	nvkm_memory_unref(&chan->mmio);
+
+	nvkm_vmm_put(chan->vmm, &chan->zcull_vma);
+	nvkm_memory_unref(&chan->zcull);
 
 	nvkm_vmm_put(chan->vmm, &chan->attrib_cb);
 	nvkm_vmm_put(chan->vmm, &chan->unknown);
@@ -466,6 +475,25 @@ gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 			      chan->mmio_vma, &args, sizeof(args));
 	if (ret)
 		return ret;
+
+	/* GM20B: per-channel ZCULL ctxsw buffer, as nvgpu ZCULL_BIND mode 2. */
+	if (gr->base.has_zcull_info && device->type == NVKM_DEVICE_TEGRA &&
+	    device->card_type == GM100) {
+		ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, gr->size_zcull,
+				      0x1000, true, &chan->zcull);
+		if (ret)
+			return ret;
+
+		ret = nvkm_vmm_get(fifoch->vmm, 12, nvkm_memory_size(chan->zcull),
+				   &chan->zcull_vma);
+		if (ret)
+			return ret;
+
+		ret = nvkm_memory_map(chan->zcull, 0, fifoch->vmm, chan->zcull_vma,
+				      NULL, 0);
+		if (ret)
+			return ret;
+	}
 
 	/* finally, fill in the mmio list and point the context at it */
 	nvkm_kmap(chan->mmio);
@@ -1747,6 +1775,45 @@ gf100_gr_init_csdata(struct gf100_gr *gr,
 }
 
 /* Initialize context from an external (secure or not) firmware */
+/* GM20B without GSP: ZCULL geometry as nvgpu gr_gk20a_get_zcull_info. */
+static void
+gm20b_gr_zcull_info(struct gf100_gr *gr)
+{
+	struct nvkm_subdev *subdev = &gr->base.engine.subdev;
+	struct nvkm_device *device = subdev->device;
+	struct nvkm_gr_zcull_info *i = &gr->base.zcull_info;
+	u32 zcb = 0, gpc;
+
+	for (gpc = 0; gpc < gr->gpc_nr; gpc++)
+		zcb += (nvkm_rd32(device, GPC_UNIT(gpc, 0x2608)) >> 16) & 0x1f;
+
+	/* gf117_gr_init_zcull programs 4 banks per GPC. */
+	if (!gr->size_zcull || gr->gpc_nr != 1 || zcb != 4 || !gr->tpc_nr[0]) {
+		nvkm_warn(subdev, "zcull off: size %u gpc %u zcb %u\n",
+			  gr->size_zcull, gr->gpc_nr, zcb);
+		gr->base.has_zcull_info = false;
+		return;
+	}
+
+	i->width_align_pixels = gr->tpc_total * 16;
+	i->height_align_pixels = 32;
+	i->pixel_squares_by_aliquots = zcb * 16 * 16 * gr->tpc_total /
+				       (gr->gpc_nr * gr->tpc_nr[0]);
+	i->aliquot_total = nvkm_rd32(device, 0x500920) & 0xffff;
+	i->zcull_region_byte_multiplier = gr->gpc_nr * 32;
+	i->zcull_region_header_size = 1 * 32;
+	i->zcull_subregion_header_size = 1 * 0xc0;
+	i->subregion_count = 16;
+	i->subregion_width_align_pixels = gr->tpc_total * 16;
+	i->subregion_height_align_pixels = 64;
+	i->ctxsw_size = gr->size_zcull;
+	i->ctxsw_align = 0x1000;
+	if (!gr->base.has_zcull_info)
+		dev_info(device->dev, "gr: zcull %u aliquots, ctxsw %u B\n",
+			 i->aliquot_total, gr->size_zcull);
+	gr->base.has_zcull_info = i->aliquot_total != 0;
+}
+
 static int
 gf100_gr_init_ctxctl_ext(struct gf100_gr *gr)
 {
@@ -1812,6 +1879,9 @@ gf100_gr_init_ctxctl_ext(struct gf100_gr *gr)
 	ret = gf100_gr_fecs_discover_pm_image_size(gr, &gr->size_pm);
 	if (ret)
 		return ret;
+
+	if (device->type == NVKM_DEVICE_TEGRA && device->card_type == GM100)
+		gm20b_gr_zcull_info(gr);
 
 	/*XXX: We (likely) require PMU support to even bother with this.
 	 *
@@ -2104,9 +2174,15 @@ gf100_gr_init_(struct nvkm_gr *base)
 	if (ret)
 		return ret;
 
+	if (device->func->clkgate_gr)
+		device->func->clkgate_gr(device, false);
+
 	ret = gr->func->init(gr);
 	if (ret)
 		return ret;
+
+	if (device->func->clkgate_gr)
+		device->func->clkgate_gr(device, true);
 
 	nvkm_inth_allow(&subdev->inth);
 	return 0;
@@ -2117,8 +2193,12 @@ gf100_gr_fini(struct nvkm_gr *base, bool suspend)
 {
 	struct gf100_gr *gr = gf100_gr(base);
 	struct nvkm_subdev *subdev = &gr->base.engine.subdev;
+	struct nvkm_device *device = subdev->device;
 
 	nvkm_inth_block(&subdev->inth);
+
+	if (device->func->clkgate_gr)
+		device->func->clkgate_gr(device, false);
 
 	nvkm_falcon_put(&gr->gpccs.falcon, subdev);
 	nvkm_falcon_put(&gr->fecs.falcon, subdev);

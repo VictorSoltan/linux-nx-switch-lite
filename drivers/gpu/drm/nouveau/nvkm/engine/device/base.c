@@ -2993,6 +2993,8 @@ nvkm_device_fini(struct nvkm_device *device, enum nvkm_suspend_state suspend)
 	}
 
 	nvkm_therm_clkgate_fini(device->therm, suspend);
+	if (device->func->clkgate)
+		device->func->clkgate(device, false);
 
 	if (device->func->fini)
 		device->func->fini(device, suspend);
@@ -3091,6 +3093,8 @@ nvkm_device_init(struct nvkm_device *device)
 
 	nvkm_acpi_init(device);
 	nvkm_therm_clkgate_enable(device->therm);
+	if (device->func->clkgate)
+		device->func->clkgate(device, true);
 
 	time = ktime_to_us(ktime_get()) - time;
 	nvdev_trace(device, "init completed in %lldus\n", time);

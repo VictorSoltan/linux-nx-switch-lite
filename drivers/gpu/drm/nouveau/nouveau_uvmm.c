@@ -32,6 +32,10 @@
 #include <nvif/if000c.h>
 #include <nvif/if900d.h>
 
+/* Comparison switch: 1 cleans the CPU cache of the whole buffer on every bind, as upstream. */
+static bool bind_sync;
+module_param(bind_sync, bool, 0644);
+
 #define NOUVEAU_VA_SPACE_BITS		47 /* FIXME */
 #define NOUVEAU_VA_SPACE_START		0x0
 #define NOUVEAU_VA_SPACE_END		(1ULL << NOUVEAU_VA_SPACE_BITS)
@@ -149,7 +153,9 @@ nouveau_uvmm_vmm_map(struct nouveau_uvmm *uvmm,
 	case NVIF_CLASS_VMM_GM200:
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
-		if (mem->mem.type & NVIF_MEM_VRAM)
+		/* Tegra has no VRAM: volatile would keep all memory out of the L2. */
+		if ((mem->mem.type & NVIF_MEM_VRAM) ||
+		    uvmm->vmm.cli->device.info.platform == NV_DEVICE_INFO_V0_SOC)
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
@@ -195,10 +201,14 @@ nouveau_uvma_map(struct nouveau_uvma *uvma,
 	u64 offset = uvma->va.gem.offset;
 	u64 range = uvma->va.va.range;
 	u8 page_shift = uvma->page_shift;
+	int ret;
 
-	return nouveau_uvmm_vmm_map(to_uvmm(uvma), addr, range,
-				    page_shift, offset, uvma->kind,
-				    mem);
+	ret = nouveau_uvmm_vmm_map(to_uvmm(uvma), addr, range,
+				   page_shift, offset, uvma->kind,
+				   mem);
+	WARN_ONCE(ret, "nouveau: uvma map %llx+%llx page %u: %d\n",
+		  addr, range, page_shift, ret);
+	return ret;
 }
 
 static int
@@ -209,10 +219,15 @@ nouveau_uvma_unmap(struct nouveau_uvma *uvma)
 	u8 page_shift = uvma->page_shift;
 	bool sparse = !!uvma->region;
 
+	int ret;
+
 	if (drm_gpuva_invalidated(&uvma->va))
 		return 0;
 
-	return nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift, sparse);
+	ret = nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift, sparse);
+	WARN_ONCE(ret, "nouveau: uvma unmap %llx+%llx page %u: %d\n",
+		  addr, range, page_shift, ret);
+	return ret;
 }
 
 static int
@@ -477,10 +492,13 @@ select_page_shift(struct nouveau_uvmm *uvmm, struct drm_gpuva_op_map *op)
 	 * granularity that will fit, which is optimal from a correctness and
 	 * performance perspective.
 	 */
-	if (op_map_aligned_to_page_shift(op, nvbo->page))
-		return nvbo->page;
-
 	struct nouveau_mem *mem = nouveau_mem(nvbo->bo.resource);
+
+	/* Tegra: host memory takes big pages only over contiguous chunks. */
+	if (op_map_aligned_to_page_shift(op, nvbo->page) &&
+	    (nvbo->page <= PAGE_SHIFT || !nvbo->bo.resource ||
+	     !(mem->mem.type & NVIF_MEM_HOST) || mem->mem.page >= nvbo->page))
+		return nvbo->page;
 	struct nvif_vmm *vmm = &uvmm->vmm.vmm;
 	int i;
 
@@ -1246,8 +1264,9 @@ bind_lock_validate(struct nouveau_job *job, struct drm_exec *exec,
 			if (va_op->op == DRM_GPUVA_OP_UNMAP)
 				continue;
 
-			ret = nouveau_bo_validate(nouveau_gem_object(obj),
-						  true, false);
+			ret = bind_sync ?
+			      nouveau_bo_validate(nouveau_gem_object(obj), true, false) :
+			      nouveau_bo_validate_bind(nouveau_gem_object(obj), true, false);
 			if (ret)
 				return ret;
 		}

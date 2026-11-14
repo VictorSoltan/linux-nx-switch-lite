@@ -334,6 +334,22 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 			return ERR_PTR(-EINVAL);
 		}
 		nvbo->page = vmm->page[pi].shift;
+
+		/* Tegra: compressible kinds need big pages; private (NO_SHARE,
+		 * never exported to legacy VMAs) BOs take them for TLB reach.
+		 * The bind falls back to 4K if TTM's chunks are not contiguous.
+		 */
+		if ((nvbo->comp || (domain & NOUVEAU_GEM_DOMAIN_NO_SHARE)) &&
+		    (domain & NOUVEAU_GEM_DOMAIN_GART) &&
+		    cli->device.info.platform == NV_DEVICE_INFO_V0_SOC) {
+			for (i = 0; i < vmm->page_nr; i++) {
+				if (vmm->page[i].host && vmm->page[i].comp &&
+				    *size >= 1ULL << vmm->page[i].shift) {
+					nvbo->page = vmm->page[i].shift;
+					break;
+				}
+			}
+		}
 	}
 
 	nouveau_bo_fixup_align(nvbo, align, size);
@@ -674,6 +690,7 @@ nouveau_bo_map(struct nouveau_bo *nvbo)
 		return ret;
 
 	ret = ttm_bo_kmap(&nvbo->bo, 0, PFN_UP(nvbo->bo.base.size), &nvbo->kmap);
+	nouveau_bo_cpu_mapped(nvbo);
 
 	ttm_bo_unreserve(&nvbo->bo);
 	return ret;
@@ -687,6 +704,10 @@ nouveau_bo_unmap(struct nouveau_bo *nvbo)
 
 	ttm_bo_kunmap(&nvbo->kmap);
 }
+
+static bool push_sync;
+module_param(push_sync, bool, 0644);
+MODULE_PARM_DESC(push_sync, "Clean CPU caches for every BO on every validate, as upstream");
 
 void
 nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
@@ -706,6 +727,10 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 	if (nvbo->force_coherent)
 		return;
 
+	/* A whole-BO clean per pushbuf took 90 % of a core under GL */
+	if (nvbo->device_clean && !push_sync)
+		return;
+
 	i = 0;
 	while (i < ttm_dma->num_pages) {
 		struct page *p = ttm_dma->pages[i];
@@ -722,6 +747,15 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 					   num_pages * PAGE_SIZE, DMA_TO_DEVICE);
 		i += num_pages;
 	}
+
+	nvbo->device_clean = !nvbo->cpu_mapped;
+}
+
+void
+nouveau_bo_cpu_mapped(struct nouveau_bo *nvbo)
+{
+	nvbo->cpu_mapped = true;
+	nvbo->device_clean = false;
 }
 
 void
@@ -794,6 +828,16 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 	nouveau_bo_sync_for_device(nvbo);
 
 	return 0;
+}
+
+/* VM_BIND path: userspace flushes its own CPU writes, the pages were cleaned when they were DMA-mapped. */
+int
+nouveau_bo_validate_bind(struct nouveau_bo *nvbo, bool interruptible,
+			 bool no_wait_gpu)
+{
+	struct ttm_operation_ctx ctx = { interruptible, no_wait_gpu };
+
+	return ttm_bo_validate(&nvbo->bo, &nvbo->placement, &ctx);
 }
 
 void
@@ -1152,6 +1196,8 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
 	struct ttm_resource *old_reg = bo->resource;
 	struct nouveau_drm_tile *new_tile = NULL;
 	int ret = 0;
+
+	nvbo->device_clean = false;
 
 	if (new_reg->mem_type == TTM_PL_TT) {
 		ret = nouveau_ttm_tt_bind(bo->bdev, bo->ttm, new_reg);

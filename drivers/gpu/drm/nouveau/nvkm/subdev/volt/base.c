@@ -28,6 +28,27 @@
 #include <subdev/bios/volt.h>
 #include <subdev/therm.h>
 
+/* Called only by the clock worker, so VID updates and NA programming share
+ * the same serialised voltage-before-upclock / voltage-after-downclock path.
+ */
+int nvkm_volt_prepare(struct nvkm_volt *volt)
+{
+	return volt && volt->func->prepare ? volt->func->prepare(volt) : 0;
+}
+
+void nvkm_volt_complete(struct nvkm_volt *volt, int error)
+{
+	if (volt && volt->func->complete)
+		volt->func->complete(volt, error);
+}
+
+int nvkm_volt_active(struct nvkm_volt *volt, bool live)
+{
+	if (volt && volt->func->active)
+		return volt->func->active(volt, live);
+	return 0;
+}
+
 int
 nvkm_volt_get(struct nvkm_volt *volt)
 {
@@ -241,7 +262,14 @@ static int
 nvkm_volt_init(struct nvkm_subdev *subdev)
 {
 	struct nvkm_volt *volt = nvkm_volt(subdev);
-	int ret = nvkm_volt_get(volt);
+	int ret;
+
+	if (volt->func->init) {
+		ret = volt->func->init(volt);
+		if (ret)
+			return ret;
+	}
+	ret = nvkm_volt_get(volt);
 	if (ret < 0) {
 		if (ret != -ENODEV)
 			nvkm_debug(subdev, "current voltage unknown\n");
@@ -269,7 +297,11 @@ nvkm_volt_oneinit(struct nvkm_subdev *subdev)
 static void *
 nvkm_volt_dtor(struct nvkm_subdev *subdev)
 {
-	return nvkm_volt(subdev);
+	struct nvkm_volt *volt = nvkm_volt(subdev);
+
+	if (volt->func->dtor)
+		volt->func->dtor(volt);
+	return volt;
 }
 
 static const struct nvkm_subdev_func

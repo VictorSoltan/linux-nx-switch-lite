@@ -95,6 +95,10 @@ struct nvkm_device_func {
 	int (*preinit)(struct nvkm_device *);
 	int (*init)(struct nvkm_device *);
 	void (*fini)(struct nvkm_device *, enum nvkm_suspend_state suspend);
+	/* Platform clock gating after all engines are initialised. */
+	void (*clkgate)(struct nvkm_device *, bool enable);
+	/* GR engine clock gating: false before GR init/at fini, true after init. */
+	void (*clkgate_gr)(struct nvkm_device *, bool running);
 	int (*irq)(struct nvkm_device *);
 	resource_size_t (*resource_addr)(struct nvkm_device *, enum nvkm_bar_id);
 	resource_size_t (*resource_size)(struct nvkm_device *, enum nvkm_bar_id);

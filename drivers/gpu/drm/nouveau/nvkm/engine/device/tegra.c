@@ -32,6 +32,10 @@ nvkm_device_tegra_power_up(struct nvkm_device_tegra *tdev)
 {
 	int ret;
 
+	ret = clk_prepare_enable(tdev->clk_fuse);
+	if (ret)
+		return ret;
+
 	if (tdev->vdd) {
 		ret = regulator_enable(tdev->vdd);
 		if (ret)
@@ -76,26 +80,24 @@ err_clk:
 	if (tdev->vdd)
 		regulator_disable(tdev->vdd);
 err_power:
+	clk_disable_unprepare(tdev->clk_fuse);
 	return ret;
 }
 
 static int
 nvkm_device_tegra_power_down(struct nvkm_device_tegra *tdev)
 {
-	int ret;
+	int ret = 0;
 
 	clk_disable_unprepare(tdev->clk_pwr);
 	clk_disable_unprepare(tdev->clk_ref);
 	clk_disable_unprepare(tdev->clk);
 	udelay(10);
 
-	if (tdev->vdd) {
+	if (tdev->vdd)
 		ret = regulator_disable(tdev->vdd);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	clk_disable_unprepare(tdev->clk_fuse);
+	return ret;
 }
 
 static void
@@ -237,6 +239,8 @@ nvkm_device_tegra_dtor(struct nvkm_device *device)
 static const struct nvkm_device_func
 nvkm_device_tegra_func = {
 	.tegra = nvkm_device_tegra,
+	.clkgate = gm20b_device_clkgate,
+	.clkgate_gr = gm20b_device_clkgate_gr,
 	.dtor = nvkm_device_tegra_dtor,
 	.irq = nvkm_device_tegra_irq,
 	.resource_addr = nvkm_device_tegra_resource_addr,
@@ -311,6 +315,12 @@ nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
 	tdev->pmc = devm_tegra_pmc_get(&pdev->dev);
 	if (IS_ERR(tdev->pmc)) {
 		ret = PTR_ERR(tdev->pmc);
+		goto free;
+	}
+
+	tdev->clk_fuse = devm_clk_get_optional(&pdev->dev, "fuse");
+	if (IS_ERR(tdev->clk_fuse)) {
+		ret = PTR_ERR(tdev->clk_fuse);
 		goto free;
 	}
 

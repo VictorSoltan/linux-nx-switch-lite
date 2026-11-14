@@ -305,7 +305,10 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 				  (drm_need_swiotlb(drm->client.mmu.dmabits) ?
 				   TTM_ALLOCATION_POOL_USE_DMA_ALLOC : 0) |
 				  (drm->client.mmu.dmabits <= 32 ?
-				   TTM_ALLOCATION_POOL_USE_DMA32 : 0));
+				   TTM_ALLOCATION_POOL_USE_DMA32 : 0) |
+				  /* local 0049: Tegra 128K GPU pages need order-5 chunks */
+				  (drm->client.device.info.platform == NV_DEVICE_INFO_V0_SOC ?
+				   TTM_ALLOCATION_POOL_BENEFICIAL_ORDER(17 - PAGE_SHIFT) : 0));
 	if (ret) {
 		NV_ERROR(drm, "error initialising bo driver, %d\n", ret);
 		return ret;

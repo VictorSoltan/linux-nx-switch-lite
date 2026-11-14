@@ -11,6 +11,11 @@ int nvkm_volt_new_(const struct nvkm_volt_func *, struct nvkm_device *, enum nvk
 
 struct nvkm_volt_func {
 	int (*oneinit)(struct nvkm_volt *);
+	int (*init)(struct nvkm_volt *);
+	void (*dtor)(struct nvkm_volt *);
+	int (*prepare)(struct nvkm_volt *);
+	void (*complete)(struct nvkm_volt *, int error);
+	int (*active)(struct nvkm_volt *, bool);
 	int (*volt_get)(struct nvkm_volt *);
 	int (*volt_set)(struct nvkm_volt *, u32 uv);
 	int (*vid_get)(struct nvkm_volt *);

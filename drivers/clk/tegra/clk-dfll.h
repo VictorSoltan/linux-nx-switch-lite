@@ -70,6 +70,7 @@ struct tegra_dfll_soc_data *tegra_dfll_unregister(struct platform_device *pdev);
 void tegra_dfll_suspend(struct platform_device *pdev);
 void tegra_dfll_resume(struct platform_device *pdev, bool on_dfll);
 int tegra_dfll_resume_tuning(struct device *dev);
+int tegra_dfll_resume_early(struct device *dev);
 int tegra_dfll_runtime_suspend(struct device *dev);
 int tegra_dfll_runtime_resume(struct device *dev);
 

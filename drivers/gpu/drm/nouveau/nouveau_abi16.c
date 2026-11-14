@@ -38,6 +38,8 @@
 #include "nouveau_vmm.h"
 #include "nouveau_sched.h"
 
+#include <nvkm/subdev/ltc.h>
+
 static struct nouveau_abi16 *
 nouveau_abi16(struct drm_file *file_priv)
 {
@@ -305,8 +307,19 @@ nouveau_abi16_ioctl_getparam(ABI16_IOCTL_ARGS)
 	case NOUVEAU_GETPARAM_HAS_PAGEFLIP:
 		getparam->value = 1;
 		break;
-	case NOUVEAU_GETPARAM_GRAPH_UNITS:
+	case NOUVEAU_GETPARAM_GRAPH_UNITS: {
+		/* The unit counts come from GR one-time init, which otherwise
+		 * waits for the first GR user.  Tegra has no kernel GR channel,
+		 * so a Vulkan device opened first would size SLM for 0 TPCs. */
+		int ret = gr ? nvkm_subdev_oneinit(&gr->engine.subdev) : 0;
+
+		if (ret)
+			return ret;
 		getparam->value = nvkm_gr_units(gr);
+		break;
+	}
+	case 0x8001: /* local: Tegra comptag lines for private NVK */
+		getparam->value = nvkm_device->ltc ? nvkm_device->ltc->num_tags : 0;
 		break;
 	case NOUVEAU_GETPARAM_EXEC_PUSH_MAX: {
 		int ib_max = getparam_dma_ib_max(device);

@@ -49,6 +49,13 @@ struct tegra_smmu {
 	struct dentry *debugfs;
 
 	struct iommu_device iommu;	/* IOMMU Core code handle */
+
+	/* The MC loses these in SC7 */
+	u32 *ptb;
+	u32 *swgroup_regs;
+	u32 *client_regs;
+	u32 ptc_config;
+	u32 tlb_config;
 };
 
 struct tegra_pd;
@@ -454,6 +461,7 @@ static int tegra_smmu_as_prepare(struct tegra_smmu *smmu,
 	value = SMMU_PTB_DATA_VALUE(as->pd_dma, as->attr);
 	smmu_writel(smmu, value, SMMU_PTB_DATA);
 	smmu_flush(smmu);
+	smmu->ptb[as->id] = value;
 
 	as->smmu = smmu;
 	as->use_count++;
@@ -1102,6 +1110,49 @@ static void tegra_smmu_debugfs_exit(struct tegra_smmu *smmu)
 	debugfs_remove_recursive(smmu->debugfs);
 }
 
+void tegra_smmu_suspend(struct tegra_smmu *smmu)
+{
+	const struct tegra_smmu_soc *soc = smmu->soc;
+	unsigned int i;
+
+	for (i = 0; i < soc->num_swgroups; i++)
+		smmu->swgroup_regs[i] = smmu_readl(smmu, soc->swgroups[i].reg);
+
+	for (i = 0; i < soc->num_clients; i++)
+		if (soc->clients[i].regs.smmu.reg)
+			smmu->client_regs[i] =
+				smmu_readl(smmu, soc->clients[i].regs.smmu.reg);
+
+	smmu->ptc_config = smmu_readl(smmu, SMMU_PTC_CONFIG);
+	smmu->tlb_config = smmu_readl(smmu, SMMU_TLB_CONFIG);
+}
+
+void tegra_smmu_resume(struct tegra_smmu *smmu)
+{
+	const struct tegra_smmu_soc *soc = smmu->soc;
+	unsigned int i;
+
+	for_each_set_bit(i, smmu->asids, soc->num_asids) {
+		smmu_writel(smmu, i & 0x7f, SMMU_PTB_ASID);
+		smmu_writel(smmu, smmu->ptb[i], SMMU_PTB_DATA);
+	}
+
+	for (i = 0; i < soc->num_swgroups; i++)
+		smmu_writel(smmu, smmu->swgroup_regs[i], soc->swgroups[i].reg);
+
+	for (i = 0; i < soc->num_clients; i++)
+		if (soc->clients[i].regs.smmu.reg)
+			smmu_writel(smmu, smmu->client_regs[i],
+				    soc->clients[i].regs.smmu.reg);
+
+	smmu_writel(smmu, smmu->ptc_config, SMMU_PTC_CONFIG);
+	smmu_writel(smmu, smmu->tlb_config, SMMU_TLB_CONFIG);
+	smmu_flush_ptc_all(smmu);
+	smmu_flush_tlb(smmu);
+	smmu_writel(smmu, SMMU_CONFIG_ENABLE, SMMU_CONFIG);
+	smmu_flush(smmu);
+}
+
 struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 				    const struct tegra_smmu_soc *soc,
 				    struct tegra_mc *mc)
@@ -1126,6 +1177,17 @@ struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 
 	smmu->asids = devm_bitmap_zalloc(dev, soc->num_asids, GFP_KERNEL);
 	if (!smmu->asids)
+		return ERR_PTR(-ENOMEM);
+
+	smmu->ptb = devm_kcalloc(dev, soc->num_asids, sizeof(*smmu->ptb),
+				 GFP_KERNEL);
+	smmu->swgroup_regs = devm_kcalloc(dev, soc->num_swgroups,
+					  sizeof(*smmu->swgroup_regs),
+					  GFP_KERNEL);
+	smmu->client_regs = devm_kcalloc(dev, soc->num_clients,
+					 sizeof(*smmu->client_regs),
+					 GFP_KERNEL);
+	if (!smmu->ptb || !smmu->swgroup_regs || !smmu->client_regs)
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&smmu->groups);

@@ -31,7 +31,7 @@ int div_frac_get(unsigned long rate, unsigned parent_rate, u8 width,
 	if (flags & TEGRA_DIVIDER_INT)
 		divider_ux1 *= mul;
 
-	if (!div1_5_not_allowed && divider_ux1 < mul)
+	if (divider_ux1 < mul)
 		return 0;
 
 	divider_ux1 -= mul;

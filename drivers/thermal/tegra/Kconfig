@@ -25,4 +25,11 @@ config TEGRA30_TSENSOR
 	  Enable this option to support thermal management of NVIDIA Tegra30
 	  system-on-chip.
 
+config TEGRA_DFLL_THERMAL
+	bool "Tegra DFLL thermal floor and cap integration"
+	depends on TEGRA_CLK_DFLL && THERMAL_OF
+	help
+	  Connect the DFLL's temperature-dependent voltage limits to the
+	  native thermal framework and device-tree cooling maps.
+
 endmenu

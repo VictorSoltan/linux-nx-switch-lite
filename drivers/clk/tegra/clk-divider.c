@@ -125,8 +125,14 @@ static int clk_frac_div_set_rate(struct clk_hw *hw, unsigned long rate,
 static void clk_divider_restore_context(struct clk_hw *hw)
 {
 	struct clk_hw *parent = clk_hw_get_parent(hw);
-	unsigned long parent_rate = clk_hw_get_rate(parent);
+	unsigned long parent_rate;
 	unsigned long rate = clk_hw_get_rate(hw);
+
+	/* pll_c4_out3_div stays an orphan on B01 */
+	if (!parent)
+		return;
+
+	parent_rate = clk_hw_get_rate(parent);
 
 	if (clk_frac_div_set_rate(hw, rate, parent_rate) < 0)
 		WARN_ON(1);

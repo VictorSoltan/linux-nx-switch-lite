@@ -429,6 +429,9 @@ struct tegra_pcie {
 
 	struct tegra_pmc *pmc;
 
+	/* x1-r08-wlan: Switch Lite WLAN PCIe endpoint power-on reset. */
+	struct gpio_desc *wlan_reg_on;
+
 	bool legacy_phy;
 	struct phy *phy;
 
@@ -649,7 +652,11 @@ static void tegra_pcie_port_reset(struct tegra_pcie_port *port)
 		afi_writel(port->pcie, value, ctrl);
 	}
 
-	usleep_range(1000, 2000);
+	/* BCM4356 refclk must be stable for 10ms before PERST# rises. */
+	if (port->pcie->wlan_reg_on)
+		usleep_range(12000, 14000);
+	else
+		usleep_range(1000, 2000);
 
 	if (port->reset_gpio) {
 		gpiod_set_value(port->reset_gpio, 0);
@@ -658,6 +665,10 @@ static void tegra_pcie_port_reset(struct tegra_pcie_port *port)
 		value |= AFI_PEX_CTRL_RST;
 		afi_writel(port->pcie, value, ctrl);
 	}
+
+	/* CYW4356 needs at least 6ms before the first config transaction. */
+	if (port->pcie->wlan_reg_on)
+		usleep_range(7000, 8000);
 }
 
 static void disable_aspm_l0s(struct tegra_pcie_port *port)
@@ -1405,8 +1416,17 @@ static void tegra_pcie_enable_controller(struct tegra_pcie *pcie)
 	struct tegra_pcie_port *port;
 	unsigned long value;
 
-	/* enable PLL power down */
-	if (soc->has_aspm_l1ss) {
+	/*
+	 * R11: Mariko requires AFI PLL_E arbitration too, even though
+	 * this controller lacks the ASPM L1SS feature flag. L4T 4.9
+	 * sets these PLL_E control bits unconditionally for Tegra210B01.
+	 */
+	if (of_device_is_compatible(pcie->dev->of_node, "nvidia,tegra210b01-pcie"))
+		dev_info(pcie->dev, "x1-r11-plle before=0x%08x\n",
+			 afi_readl(pcie, AFI_PLLE_CONTROL));
+
+	/* enable PLL power down also for Mariko UPHY (L1SS not required) */
+	if (soc->has_aspm_l1ss || soc->program_uphy) {
 		value = afi_readl(pcie, AFI_PLLE_CONTROL);
 		value &= ~AFI_PLLE_CONTROL_BYPASS_PADS2PLLE_CONTROL;
 		value |= AFI_PLLE_CONTROL_PADS2PLLE_CONTROL_EN;
@@ -1421,6 +1441,10 @@ static void tegra_pcie_enable_controller(struct tegra_pcie *pcie)
 		value &= ~AFI_PLLE_CONTROL_BYPASS_PCIE2PLLE_CONTROL;
 		value |= AFI_PLLE_CONTROL_PCIE2PLLE_CONTROL_EN;
 		afi_writel(pcie, value, AFI_PLLE_CONTROL);
+		if (of_device_is_compatible(pcie->dev->of_node,
+					    "nvidia,tegra210b01-pcie"))
+			dev_info(pcie->dev, "x1-r11-plle after=0x%08x\n",
+				 afi_readl(pcie, AFI_PLLE_CONTROL));
 	}
 
 	/* power down PCIe slot clock bias pad */
@@ -2537,6 +2561,21 @@ static bool tegra_pcie_port_check_link(struct tegra_pcie_port *port)
 	unsigned int retries = 3;
 	unsigned long value;
 
+	/*
+	 * x1-r13-link: snapshot root-port link training *before* the driver
+	 * disables and frees the failed port. No additional register writes.
+	 */
+	dev_info(dev,
+		 "x1-r13-link initial port=%u AFI_PEX_CTRL=%08x AFI_CFG=%08x PLLE=%08x XP=%08x LNK=%08x LNK2=%08x PRSNT=%08x\n",
+		 port->index,
+		 afi_readl(port->pcie, tegra_pcie_port_get_pex_ctrl(port)),
+		 afi_readl(port->pcie, AFI_PCIE_CONFIG),
+		 afi_readl(port->pcie, AFI_PLLE_CONTROL),
+		 readl(port->base + RP_VEND_XP),
+		 readl(port->base + RP_LINK_CONTROL_STATUS),
+		 readl(port->base + RP_LINK_CONTROL_STATUS_2),
+		 readl(port->base + RP_PRIV_MISC));
+
 	/* override presence detection */
 	value = readl(port->base + RP_PRIV_MISC);
 	value &= ~RP_PRIV_MISC_PRSNT_MAP_EP_ABSNT;
@@ -2572,9 +2611,21 @@ static bool tegra_pcie_port_check_link(struct tegra_pcie_port *port)
 		} while (--timeout);
 
 retry:
+		dev_info(dev,
+			 "x1-r13-link retry=%u XP=%08x LNK=%08x LNK2=%08x PEX=%08x\n",
+			 4 - retries,
+			 readl(port->base + RP_VEND_XP),
+			 readl(port->base + RP_LINK_CONTROL_STATUS),
+			 readl(port->base + RP_LINK_CONTROL_STATUS_2),
+			 afi_readl(port->pcie, tegra_pcie_port_get_pex_ctrl(port)));
 		tegra_pcie_port_reset(port);
 	} while (--retries);
 
+	dev_info(dev,
+		 "x1-r13-link terminal port=%u XP=%08x LNK=%08x AFI_CFG=%08x\n",
+		 port->index, readl(port->base + RP_VEND_XP),
+		 readl(port->base + RP_LINK_CONTROL_STATUS),
+		 afi_readl(port->pcie, AFI_PCIE_CONFIG));
 	return false;
 }
 
@@ -2646,6 +2697,17 @@ static void tegra_pcie_enable_ports(struct tegra_pcie *pcie)
 			 port->index, port->lanes);
 
 		tegra_pcie_port_enable(port);
+
+		/* Match L4T: assert endpoint presence before starting LTSSM. */
+		if (pcie->wlan_reg_on) {
+			u32 presence = readl(port->base + RP_PRIV_MISC);
+
+			presence &= ~RP_PRIV_MISC_PRSNT_MAP_EP_ABSNT;
+			presence |= RP_PRIV_MISC_PRSNT_MAP_EP_PRSNT;
+			writel(presence, port->base + RP_PRIV_MISC);
+			dev_info(dev, "x1-r17-presence: before LTSSM port=%u PRSNT=%08x\n",
+				 port->index, readl(port->base + RP_PRIV_MISC));
+		}
 	}
 
 	/* Start LTSSM from Tegra side */
@@ -2793,7 +2855,7 @@ static const struct tegra_pcie_soc tegra210b01_pcie = {
 			.rp_ectl_5_r2 = 0x55010000,
 			.rp_ectl_6_r2 = 0x00000001,
 		},
-		.enable = true,
+		.enable = false,
 	},
 };
 
@@ -2979,6 +3041,13 @@ static int tegra_pcie_probe(struct platform_device *pdev)
 	if (err < 0)
 		return err;
 
+	/* Optional board-specific WLAN rail; other Tegra boards are untouched. */
+	pcie->wlan_reg_on = devm_gpiod_get_optional(dev, "wlan-reg-on",
+						      GPIOD_OUT_LOW);
+	if (IS_ERR(pcie->wlan_reg_on))
+		return dev_err_probe(dev, PTR_ERR(pcie->wlan_reg_on),
+				     "x1-r08-wlan: cannot claim WL_REG_ON\n");
+
 	err = tegra_pcie_get_resources(pcie);
 	if (err < 0) {
 		dev_err(dev, "failed to request resources: %d\n", err);
@@ -3075,12 +3144,6 @@ static int tegra_pcie_pm_resume(struct device *dev)
 		goto poweroff;
 	}
 
-	tegra_pcie_enable_controller(pcie);
-	tegra_pcie_setup_translations(pcie);
-
-	if (IS_ENABLED(CONFIG_PCI_MSI))
-		tegra_pcie_enable_msi(pcie);
-
 	err = clk_prepare_enable(pcie->pex_clk);
 	if (err) {
 		dev_err(dev, "failed to enable PEX clock: %d\n", err);
@@ -3097,7 +3160,30 @@ static int tegra_pcie_pm_resume(struct device *dev)
 		}
 	}
 
+	/*
+	 * x1-r12-order: L4T 4.9 powers the Mariko UPHY first and then
+	 * configures AFI controller and mappings. Tegra6.18 did inverse.
+	 * Keep all other board settings intact for a single-variable test.
+	 */
+	if (of_device_is_compatible(pcie->dev->of_node,
+				    "nvidia,tegra210b01-pcie"))
+		dev_info(pcie->dev, "x1-r12-order: PHY ready, enabling AFI now\n");
+	tegra_pcie_enable_controller(pcie);
+	tegra_pcie_setup_translations(pcie);
+
+	if (IS_ENABLED(CONFIG_PCI_MSI))
+		tegra_pcie_enable_msi(pcie);
+
 	tegra_pcie_apply_pad_settings(pcie);
+
+	/* Switch Lite: cold cycle WL_REG_ON after rails/UPHY become ready. */
+	if (pcie->wlan_reg_on) {
+		gpiod_set_value_cansleep(pcie->wlan_reg_on, 0);
+		msleep(30);
+		gpiod_set_value_cansleep(pcie->wlan_reg_on, 1);
+		dev_info(pcie->dev, "x1-r08-wlan: WL_REG_ON asserted, waiting for POR\n");
+		msleep(130);
+	}
 	tegra_pcie_enable_ports(pcie);
 
 	return 0;

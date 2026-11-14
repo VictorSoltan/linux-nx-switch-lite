@@ -411,6 +411,70 @@ const irq_handler_t tegra30_mc_irq_handlers[] = {
     defined(CONFIG_ARCH_TEGRA_124_SOC) || \
     defined(CONFIG_ARCH_TEGRA_132_SOC) || \
     defined(CONFIG_ARCH_TEGRA_210_SOC)
+/* What tegra21x_la.c leaves in L4T at EMC 2533 with the Lite panel: ring 1 keeps its share against the GPU. */
+static const struct { u16 reg; u16 val; } tegra210_ptsa[] = {
+	{ 0x41c, 0xd }, /* DIS_PTSA_RATE */
+	{ 0x420, 0x3b }, /* DIS_PTSA_MIN */
+	{ 0x424, 0x1f }, /* DIS_PTSA_MAX */
+	{ 0x428, 0x448 }, /* DISB_PTSA_RATE */
+	{ 0x42c, 0x3b }, /* DISB_PTSA_MIN */
+	{ 0x430, 0x1f }, /* DISB_PTSA_MAX */
+	{ 0x438, 0x3b }, /* VE_PTSA_MIN */
+	{ 0x43c, 0x1f }, /* VE_PTSA_MAX */
+	{ 0x440, 0xc }, /* RING2_PTSA_RATE */
+	{ 0x444, 0x3e }, /* RING2_PTSA_MIN */
+	{ 0x448, 0x0 }, /* RING2_PTSA_MAX */
+	{ 0x450, 0x3c }, /* MLL_MPCORER_PTSA_MIN */
+	{ 0x454, 0x4 }, /* MLL_MPCORER_PTSA_MAX */
+	{ 0x45c, 0x1 }, /* SMMU_SMMU_PTSA_MIN */
+	{ 0x460, 0x1 }, /* SMMU_SMMU_PTSA_MAX */
+	{ 0x47c, 0x364 }, /* RING1_PTSA_RATE */
+	{ 0x480, 0x3b }, /* RING1_PTSA_MIN */
+	{ 0x484, 0x1f }, /* RING1_PTSA_MAX */
+	{ 0x48c, 0x3b }, /* A9AVPPC_PTSA_MIN */
+	{ 0x490, 0x10 }, /* A9AVPPC_PTSA_MAX */
+	{ 0x498, 0x3e }, /* VE2_PTSA_MIN */
+	{ 0x49c, 0x0 }, /* VE2_PTSA_MAX */
+	{ 0x4a4, 0x3b }, /* ISP_PTSA_MIN */
+	{ 0x4a8, 0x1f }, /* ISP_PTSA_MAX */
+	{ 0x4b0, 0x3e }, /* PCX_PTSA_MIN */
+	{ 0x4b4, 0x0 }, /* PCX_PTSA_MAX */
+	{ 0x4bc, 0x3e }, /* SAX_PTSA_MIN */
+	{ 0x4c0, 0x0 }, /* SAX_PTSA_MAX */
+	{ 0x4c8, 0x3e }, /* MSE_PTSA_MIN */
+	{ 0x4cc, 0x0 }, /* MSE_PTSA_MAX */
+	{ 0x4d4, 0x3e }, /* SD_PTSA_MIN */
+	{ 0x4d8, 0x0 }, /* SD_PTSA_MAX */
+	{ 0x4e0, 0x3e }, /* AHB_PTSA_MIN */
+	{ 0x4e4, 0x0 }, /* AHB_PTSA_MAX */
+	{ 0x4ec, 0x3e }, /* APB_PTSA_MIN */
+	{ 0x4f0, 0x0 }, /* APB_PTSA_MAX */
+	{ 0x4f8, 0x3e }, /* AVP_PTSA_MIN */
+	{ 0x4fc, 0x0 }, /* AVP_PTSA_MAX */
+	{ 0x510, 0x3e }, /* FTOP_PTSA_MIN */
+	{ 0x514, 0x0 }, /* FTOP_PTSA_MAX */
+	{ 0x51c, 0x3e }, /* HOST_PTSA_MIN */
+	{ 0x520, 0x0 }, /* HOST_PTSA_MAX */
+	{ 0x528, 0x3e }, /* USBX_PTSA_MIN */
+	{ 0x52c, 0x0 }, /* USBX_PTSA_MAX */
+	{ 0x534, 0x3e }, /* USBD_PTSA_MIN */
+	{ 0x538, 0x0 }, /* USBD_PTSA_MAX */
+	{ 0x540, 0x3e }, /* GK_PTSA_MIN */
+	{ 0x544, 0x0 }, /* GK_PTSA_MAX */
+	{ 0x54c, 0x3b }, /* AUD_PTSA_MIN */
+	{ 0x550, 0x1f }, /* AUD_PTSA_MAX */
+	{ 0x558, 0x3e }, /* VICPC_PTSA_MIN */
+	{ 0x55c, 0x0 }, /* VICPC_PTSA_MAX */
+	{ 0x588, 0x3e }, /* JPG_PTSA_MIN */
+	{ 0x58c, 0x0 }, /* JPG_PTSA_MAX */
+	{ 0x614, 0x3e }, /* GK2_PTSA_MIN */
+	{ 0x618, 0x0 }, /* GK2_PTSA_MAX */
+	{ 0x620, 0x3e }, /* SDM_PTSA_MIN */
+	{ 0x624, 0x0 }, /* SDM_PTSA_MAX */
+	{ 0x62c, 0x3e }, /* HDAPC_PTSA_MIN */
+	{ 0x630, 0x0 }, /* HDAPC_PTSA_MAX */
+};
+
 static void tegra_mc_setup_latency_allowance(struct tegra_mc *mc)
 {
 	unsigned long long tick;
@@ -436,6 +500,10 @@ static void tegra_mc_setup_latency_allowance(struct tegra_mc *mc)
 		value |= (client->regs.la.def & client->regs.la.mask) << client->regs.la.shift;
 		mc_writel(mc, value, client->regs.la.reg);
 	}
+
+	if (IS_ENABLED(CONFIG_ARCH_TEGRA_210_SOC) && mc->soc == &tegra210_mc_soc)
+		for (i = 0; i < ARRAY_SIZE(tegra210_ptsa); i++)
+			mc_writel(mc, tegra210_ptsa[i].val, tegra210_ptsa[i].reg);
 
 	/* latch new values */
 	mc_writel(mc, MC_TIMING_UPDATE, MC_TIMING_CONTROL);
@@ -852,6 +920,14 @@ static int tegra_mc_interconnect_setup(struct tegra_mc *mc)
 	mc->provider.set = mc->soc->icc_ops->set;
 	mc->provider.aggregate = mc->soc->icc_ops->aggregate;
 	mc->provider.get_bw = mc->soc->icc_ops->get_bw;
+	/*
+	 * B01 uses BPMP EMC with native ACTMON. MC has no boot bandwidth
+	 * reservations to import; synthetic INT_MAX votes otherwise survive
+	 * while unrelated DT consumers defer sync_state. Keep real consumers'
+	 * requests and ISO scaling. Boot holds EMC high until ACTMON is ready.
+	 */
+	if (of_machine_is_compatible("nvidia,tegra210b01"))
+		mc->provider.get_bw = tegra_mc_icc_get;
 	mc->provider.xlate = mc->soc->icc_ops->xlate;
 	mc->provider.xlate_extended = mc->soc->icc_ops->xlate_extended;
 
@@ -1037,7 +1113,30 @@ static int tegra_mc_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(tegra_mc_pm_ops, NULL, tegra_mc_resume);
+static int tegra_mc_suspend_noirq(struct device *dev)
+{
+	struct tegra_mc *mc = dev_get_drvdata(dev);
+
+	if (mc->smmu)
+		tegra_smmu_suspend(mc->smmu);
+
+	return 0;
+}
+
+static int tegra_mc_resume_noirq(struct device *dev)
+{
+	struct tegra_mc *mc = dev_get_drvdata(dev);
+
+	if (mc->smmu)
+		tegra_smmu_resume(mc->smmu);
+
+	return 0;
+}
+
+static const struct dev_pm_ops tegra_mc_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(NULL, tegra_mc_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(tegra_mc_suspend_noirq, tegra_mc_resume_noirq)
+};
 
 static struct platform_driver tegra_mc_driver = {
 	.driver = {

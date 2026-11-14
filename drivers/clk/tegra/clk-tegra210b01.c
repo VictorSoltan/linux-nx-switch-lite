@@ -3035,6 +3035,18 @@ static void __init tegra210_pll_init(void __iomem *clk_base,
 	clk_register_clkdev(clk, "pll_c4_vco", NULL);
 	clks[TEGRA210_CLK_PLL_C4] = clk;
 
+	/*
+	 * PLLC4_OUT0: VCO post divider, as on Tegra210. Read-only: the boot
+	 * loader programs it (DIVP 0, 998.4 MHz) and SDMMC1 only reads it.
+	 * Also gives pll_c4_out3_div its parent.
+	 */
+	clk = clk_register_divider_table(NULL, "pll_c4_out0", "pll_c4_vco", 0,
+					 clk_base + PLLC4_BASE, 19, 5,
+					 CLK_DIVIDER_READ_ONLY,
+					 pll_vco_post_div_table, NULL);
+	clk_register_clkdev(clk, "pll_c4_out0", NULL);
+	clks[TEGRA210_CLK_PLL_C4_OUT0] = clk;
+
 	/* PLLC4_OUT1 */
 	clk = clk_register_fixed_factor(NULL, "pll_c4_out1", "pll_c4_vco",
 					CLK_SET_RATE_PARENT, 1, 3);
@@ -3256,6 +3268,7 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA210_CLK_HOST1X, TEGRA210_CLK_PLL_P, 136000000, 1 },
 	{ TEGRA210_CLK_SCLK_MUX, TEGRA210_CLK_PLL_P, 0, 1 },
 	{ TEGRA210_CLK_SCLK, TEGRA210_CLK_CLK_MAX, 102000000, 0 },
+	{ TEGRA210_CLK_PCLK, TEGRA210_CLK_CLK_MAX, 51000000, 0 },
 	{ TEGRA210_CLK_DFLL_SOC, TEGRA210_CLK_PLL_P, 51000000, 1 },
 	{ TEGRA210_CLK_DFLL_REF, TEGRA210_CLK_PLL_P, 51000000, 1 },
 	{ TEGRA210_CLK_SBC4, TEGRA210_CLK_PLL_P, 12000000, 1 },
@@ -3270,7 +3283,7 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA210_CLK_XUSB_DEV_SRC, TEGRA210_CLK_PLL_P_OUT_XUSB, 102000000, 0 },
 	{ TEGRA210_CLK_SATA, TEGRA210_CLK_PLL_P, 104000000, 0 },
 	{ TEGRA210_CLK_SATA_OOB, TEGRA210_CLK_PLL_P, 204000000, 0 },
-	{ TEGRA210_CLK_MSELECT, TEGRA210_CLK_CLK_MAX, 0, 1 },
+	{ TEGRA210_CLK_MSELECT, TEGRA210_CLK_CLK_MAX, 204000000, 1 },
 	{ TEGRA210_CLK_CSITE, TEGRA210_CLK_CLK_MAX, 0, 1 },
 	/* TODO find a way to enable this on-demand */
 	{ TEGRA210_CLK_DBGAPB, TEGRA210_CLK_CLK_MAX, 0, 1 },

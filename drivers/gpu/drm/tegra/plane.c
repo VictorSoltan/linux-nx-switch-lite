@@ -9,6 +9,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_atomic_helper.h>
@@ -65,6 +66,7 @@ tegra_plane_atomic_duplicate_state(struct drm_plane *plane)
 	copy->swap = state->swap;
 	copy->reflect_x = state->reflect_x;
 	copy->reflect_y = state->reflect_y;
+	copy->transpose = state->transpose;
 	copy->opaque = state->opaque;
 	copy->total_peak_memory_bandwidth = state->total_peak_memory_bandwidth;
 	copy->peak_memory_bandwidth = state->peak_memory_bandwidth;
@@ -242,6 +244,10 @@ static int tegra_plane_calculate_memory_bandwidth(struct drm_plane_state *state)
 	src_h = drm_rect_height(&state->src) >> 16;
 	dst_w = drm_rect_width(&state->dst);
 	dst_h = drm_rect_height(&state->dst);
+
+	/* the source rectangle is in framebuffer orientation */
+	if (drm_rotation_90_or_270(state->rotation))
+		swap(src_w, src_h);
 
 	fmt = state->fb->format;
 	soc = to_tegra_dc(state->crtc)->soc;

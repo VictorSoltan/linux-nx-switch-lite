@@ -593,6 +593,8 @@
 
 	pcie@1003000 {
 		status = "okay";
+		/* R08: GPIO is exclusively owned by PCIe for a real cold cycle. */
+		wlan-reg-on-gpios = <&gpio TEGRA_GPIO(H, 1) GPIO_ACTIVE_HIGH>;
 
 		avdd-pll-uerefe-supply = <&max77620_ldo1>;
 		hvddio-pex-supply = <&max77620_sd3>;
@@ -611,6 +613,8 @@
 
 		pci@2,0 {
 			status = "okay";
+			/* R10: match the working L4T PCIe CLKREQ# policy. */
+			supports-clkreq;
 			phys = <&{/padctl@7009f000/pads/pcie/lanes/pcie-0}>;
 			phy-names = "pcie-0";
 
@@ -682,6 +686,7 @@
 				mode = "otg";
 
 				usb-role-switch;
+				role-switch-default-mode = "peripheral";
 				vbus-supply = <&battery_reg>;
 
 				#address-cells = <1>;
@@ -750,47 +755,46 @@
 		nvidia,sys-clock-req-active-high;
 		status = "okay";
 
-		// TODO
-		// bootrom-commands {
-		// 	reset-commands {
-		// 		nvidia,command-retries-count = <2>;
-		// 		nvidia,delay-between-commands-us = <10>;
-		// 		nvidia,wait-before-start-bus-clear-us = <10>;
-		// 		#address-cells = <1>;
-		// 		#size-cells = <0>;
+		bootrom-commands {
+			reset-commands {
+				nvidia,command-retries-count = <2>;
+				nvidia,delay-between-commands-us = <10>;
+				nvidia,wait-before-start-bus-clear-us = <10>;
+				#address-cells = <1>;
+				#size-cells = <0>;
 
-		// 		commands@4-0068 {
-		// 			nvidia,command-names = "r2p-setup";
-		// 			reg = <0x68>;
-		// 			nvidia,enable-8bit-register;
-		// 			nvidia,enable-8bit-data;
-		// 			nvidia,controller-type-i2c;
-		// 			nvidia,controller-id = <4>;
-		// 			nvidia,enable-controller-reset;
-		// 			nvidia,write-commands = <
-		// 					0x13 0x00 /* r2p enc 0 */
-		// 					0x1A 0x00 /* r2p enc 1 */
-		// 					0x11 0x00 /* r2p mgc 0 */
-		// 					0x18 0x00 /* r2p mgc 1 */
-		// 					0x04 0x01 /* Update RTC regs */
-		// 				>;
-		// 		};
-		// 		commands@4-003c {
-		// 			nvidia,command-names = "pmic-rails";
-		// 			reg = <0x3c>;
-		// 			nvidia,enable-8bit-register;
-		// 			nvidia,enable-8bit-data;
-		// 			nvidia,controller-type-i2c;
-		// 			nvidia,controller-id = <4>;
-		// 			nvidia,enable-controller-reset;
-		// 			nvidia,write-commands = <
-		// 					0x16 0x20 /* Set 1.0V and disable SD0 */
-		// 					0x42 0x99 /* Wake reasons: SFT_RST/ACOK/LID/EN0 */
-		// 					0x41 0x80 /* Reboot */
-		// 				>;
-		// 		};
-		// 	};
-		// };
+				commands@4-0068 {
+					nvidia,command-names = "r2p-setup";
+					reg = <0x68>;
+					nvidia,enable-8bit-register;
+					nvidia,enable-8bit-data;
+					nvidia,controller-type-i2c;
+					nvidia,controller-id = <4>;
+					nvidia,enable-controller-reset;
+					nvidia,write-commands = <
+							0x13 0x00 /* r2p enc 0 */
+							0x1A 0x00 /* r2p enc 1 */
+							0x11 0x00 /* r2p mgc 0 */
+							0x18 0x00 /* r2p mgc 1 */
+							0x04 0x01 /* Update RTC regs */
+						>;
+				};
+				commands@4-003c {
+					nvidia,command-names = "pmic-rails";
+					reg = <0x3c>;
+					nvidia,enable-8bit-register;
+					nvidia,enable-8bit-data;
+					nvidia,controller-type-i2c;
+					nvidia,controller-id = <4>;
+					nvidia,enable-controller-reset;
+					nvidia,write-commands = <
+							0x16 0x20 /* Set 1.0V and disable SD0 */
+							0x42 0x99 /* Wake reasons: SFT_RST/ACOK/LID/EN0 */
+							0x41 0x80 /* Reboot */
+						>;
+				};
+			};
+		};
 	};
 
 	clk32k_in: clock-32k {
@@ -1219,11 +1223,11 @@
 					regulator-ramp-delay = <50000>;
 				};
 
-				/* Not used on T210B01 */
+				/* PCIe reference PLL on Mariko. */
 				max77620_ldo7: ldo7 {
 					regulator-name = "vdd-gen-pll-edp";
 					regulator-min-microvolt = <1000000>;
-					regulator-max-microvolt = <1000000>; /* 3100000 */
+					regulator-max-microvolt = <1000000>;
 					maxim,active-fps-source = <MAX77620_FPS_SRC_NONE>;
 					maxim,active-fps-power-up-slot = <0>;
 					maxim,active-fps-power-down-slot = <0>;

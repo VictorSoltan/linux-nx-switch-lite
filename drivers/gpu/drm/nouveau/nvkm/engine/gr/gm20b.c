@@ -20,6 +20,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include "gf100.h"
+
+#include <subdev/ltc.h>
 #include "ctxgf100.h"
 
 #include <core/firmware.h>
@@ -113,6 +115,20 @@ gm20b_gr_set_hww_esr_report_mask(struct gf100_gr *gr)
 	nvkm_wr32(device, 0x419e4c, 0x5);
 }
 
+/* nvgpu gr_gm20b_init_fs_state: ZROP/CROP take the number of active LTCs.
+ * The FBP count (gk104_gr_init_rop_active_fbps) is 1 on GM20B while both
+ * LTCs are active (FB/LTC/GPC MMU already say 2).
+ */
+static void
+gm20b_gr_init_rop_active_ltcs(struct gf100_gr *gr)
+{
+	struct nvkm_device *device = gr->base.engine.subdev.device;
+	const u32 ltc_nr = device->ltc ? device->ltc->ltc_nr : 1;
+
+	nvkm_mask(device, 0x408850, 0x0000000f, ltc_nr); /* zrop */
+	nvkm_mask(device, 0x408958, 0x0000000f, ltc_nr); /* crop */
+}
+
 static const struct gf100_gr_func
 gm20b_gr = {
 	.oneinit_tiles = gm200_gr_oneinit_tiles,
@@ -120,7 +136,7 @@ gm20b_gr = {
 	.init = gk20a_gr_init,
 	.init_zcull = gf117_gr_init_zcull,
 	.init_gpc_mmu = gm20b_gr_init_gpc_mmu,
-	.init_rop_active_fbps = gk104_gr_init_rop_active_fbps,
+	.init_rop_active_fbps = gm20b_gr_init_rop_active_ltcs,
 	.trap_mp = gf100_gr_trap_mp,
 	.set_hww_esr_report_mask = gm20b_gr_set_hww_esr_report_mask,
 	.fecs.reset = gf100_gr_fecs_reset,

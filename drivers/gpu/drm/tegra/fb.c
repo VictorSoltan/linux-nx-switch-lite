@@ -46,6 +46,18 @@ int tegra_fb_get_tiling(struct drm_framebuffer *framebuffer,
 			tiling->sector_layout = TEGRA_BO_SECTOR_LAYOUT_GPU;
 
 		modifier &= ~DRM_FORMAT_MOD_NVIDIA_SECTOR_LAYOUT;
+
+		/*
+		 * Mesa (NVK, nouveau GL) describes 16Bx2 block linear surfaces
+		 * with the generic modifier: page kind 0xfe, Fermi GOB kind
+		 * generation, no compression. drm_fourcc.h documents this as the
+		 * canonical form of DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(v) (legacy
+		 * kind 0 is remapped to 0xfe). The display engine does not use
+		 * the GPU page kind, so treat both encodings alike.
+		 */
+		if ((modifier & ~0xfULL) ==
+		    (DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 0) & ~0xfULL))
+			modifier = DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(modifier & 0xf);
 	}
 
 	switch (modifier) {

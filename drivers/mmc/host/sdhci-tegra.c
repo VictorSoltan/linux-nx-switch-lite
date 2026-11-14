@@ -10,6 +10,7 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
+#include <linux/interconnect.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
 #include <linux/iopoll.h>
@@ -19,6 +20,7 @@
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/slot-gpio.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
@@ -26,6 +28,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/reset.h>
+#include <linux/workqueue.h>
 
 #include <soc/tegra/common.h>
 
@@ -73,6 +76,7 @@
 #define SDHCI_VNDR_TUN_CTRL0_TUN_ITER_SHIFT		13
 #define TRIES_128					2
 #define TRIES_256					4
+
 #define SDHCI_VNDR_TUN_CTRL0_TUN_WORD_SEL_MASK		0x7
 
 #define SDHCI_TEGRA_VNDR_TUN_CTRL1_0			0x1c4
@@ -82,10 +86,25 @@
 #define SDHCI_TEGRA_VNDR_TUN_STATUS1_END_TAP_SHIFT	0x8
 #define TUNING_WORD_BIT_SIZE				32
 
+#define TEGRA_SDHCI_DDR200_TAPS				128
+#define TEGRA_SDHCI_DDR200_MIN_WINDOW			8
+#define TEGRA_SDHCI_TUNING_TIMEOUT_COUNT		7
+
+/*
+ * L4T holds 550 MHz shared EMC while DDR200 runs (SDMMC_DDR200_EMC_MAX_FREQ):
+ * at the 204 MHz idle EMC the read DMA falls behind and DDR200 reads fail CRC.
+ * The Tegra EMC provider turns bytes/s into a rate at 16 bytes per clock.
+ */
+#define TEGRA_SDHCI_DDR200_EMC_BW			MBps_to_icc(550 * 16)
+#define TEGRA_SDHCI_DDR200_EMC_HOLD			msecs_to_jiffies(200)
+
 #define SDHCI_TEGRA_AUTO_CAL_CONFIG			0x1e4
 #define SDHCI_AUTO_CAL_START				BIT(31)
 #define SDHCI_AUTO_CAL_ENABLE				BIT(29)
 #define SDHCI_AUTO_CAL_PDPU_OFFSET_MASK			0x0000ffff
+
+#define SDHCI_TEGRA_VNDR_IO_TRIM_CTRL			0x1ac
+#define SDHCI_TEGRA_VNDR_IO_TRIM_CTRL_SEL_VREG		BIT(2)
 
 #define SDHCI_TEGRA_SDMEM_COMP_PADCTRL			0x1e0
 #define SDHCI_TEGRA_SDMEM_COMP_PADCTRL_VREF_SEL_MASK	0x0000000f
@@ -182,6 +201,13 @@ struct sdhci_tegra {
 	bool enable_hwcq;
 	unsigned long curr_clk_rate;
 	u8 tuned_tap_delay;
+	u8 ddr200_tap;
+	bool io_trim_active;
+	struct icc_path *ddr200_emc;
+	struct mutex ddr200_emc_lock;
+	struct delayed_work ddr200_emc_release;
+	unsigned long ddr200_emc_last;
+	bool ddr200_emc_voted;
 	u32 stream_id;
 };
 
@@ -414,6 +440,22 @@ static void tegra_sdhci_reset(struct sdhci_host *host, u8 mask)
 		sdhci_writel(host, pad_ctrl, SDHCI_TEGRA_SDMEM_COMP_PADCTRL);
 
 		tegra_host->pad_calib_required = true;
+	}
+
+	/*
+	 * As L4T does while the host clock runs: SEL_VREG cleared is the
+	 * active I/O trim state, set is the idle one the controller keeps
+	 * otherwise. DDR200 needs the active receivers.
+	 */
+	if (tegra_host->io_trim_active) {
+		u32 trim = sdhci_readl(host, SDHCI_TEGRA_VNDR_IO_TRIM_CTRL);
+
+		if (trim & SDHCI_TEGRA_VNDR_IO_TRIM_CTRL_SEL_VREG) {
+			sdhci_writel(host, trim & ~SDHCI_TEGRA_VNDR_IO_TRIM_CTRL_SEL_VREG,
+				     SDHCI_TEGRA_VNDR_IO_TRIM_CTRL);
+			udelay(3);
+			sdhci_reset(host, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+		}
 	}
 
 	tegra_host->ddr_signaling = false;
@@ -693,12 +735,68 @@ static void tegra_sdhci_parse_pad_autocal_dt(struct sdhci_host *host)
 	}
 }
 
+/* Caller holds ddr200_emc_lock. */
+static void tegra_sdhci_ddr200_emc_drop(struct sdhci_tegra *tegra_host)
+{
+	if (tegra_host->ddr200_emc_voted &&
+	    !icc_set_bw(tegra_host->ddr200_emc, 0, 0))
+		tegra_host->ddr200_emc_voted = false;
+}
+
+static void tegra_sdhci_ddr200_emc_release(struct work_struct *work)
+{
+	struct sdhci_tegra *tegra_host = container_of(to_delayed_work(work),
+			struct sdhci_tegra, ddr200_emc_release);
+	unsigned long due;
+
+	mutex_lock(&tegra_host->ddr200_emc_lock);
+	due = tegra_host->ddr200_emc_last + TEGRA_SDHCI_DDR200_EMC_HOLD;
+	if (time_before(jiffies, due))
+		mod_delayed_work(system_dfl_wq, &tegra_host->ddr200_emc_release,
+				 due - jiffies);
+	else
+		tegra_sdhci_ddr200_emc_drop(tegra_host);
+	mutex_unlock(&tegra_host->ddr200_emc_lock);
+}
+
+/* Hold the EMC floor while DDR200 transfers run, release it after idle. */
+static void tegra_sdhci_ddr200_emc_hold(struct mmc_host *mmc,
+					struct sdhci_tegra *tegra_host)
+{
+	if (!tegra_host->ddr200_emc || mmc->ios.timing != MMC_TIMING_UHS_DDR50 ||
+	    mmc->ios.clock <= UHS_DDR50_MAX_DTR)
+		return;
+
+	mutex_lock(&tegra_host->ddr200_emc_lock);
+	tegra_host->ddr200_emc_last = jiffies;
+	if (!tegra_host->ddr200_emc_voted &&
+	    !icc_set_bw(tegra_host->ddr200_emc, 0, TEGRA_SDHCI_DDR200_EMC_BW))
+		tegra_host->ddr200_emc_voted = true;
+	mutex_unlock(&tegra_host->ddr200_emc_lock);
+
+	mod_delayed_work(system_dfl_wq, &tegra_host->ddr200_emc_release,
+			 TEGRA_SDHCI_DDR200_EMC_HOLD);
+}
+
+static void tegra_sdhci_ddr200_emc_stop(struct sdhci_tegra *tegra_host)
+{
+	if (!tegra_host->ddr200_emc)
+		return;
+
+	cancel_delayed_work_sync(&tegra_host->ddr200_emc_release);
+	mutex_lock(&tegra_host->ddr200_emc_lock);
+	tegra_sdhci_ddr200_emc_drop(tegra_host);
+	mutex_unlock(&tegra_host->ddr200_emc_lock);
+}
+
 static void tegra_sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(pltfm_host);
 	ktime_t since_calib = ktime_sub(ktime_get(), tegra_host->last_calib);
+
+	tegra_sdhci_ddr200_emc_hold(mmc, tegra_host);
 
 	/* 100 ms calibration interval is specified in the TRM */
 	if (ktime_to_ms(since_calib) > 100) {
@@ -740,6 +838,11 @@ static void tegra_sdhci_parse_dt(struct sdhci_host *host)
 		tegra_host->enable_hwcq = true;
 	else
 		tegra_host->enable_hwcq = false;
+
+	if (device_property_read_bool(mmc_dev(host->mmc), "nvidia,sd-ddr200")) {
+		host->mmc->caps2 |= MMC_CAP2_SD_DDR200;
+		tegra_host->io_trim_active = true;
+	}
 
 	tegra_sdhci_parse_pad_autocal_dt(host);
 	tegra_sdhci_parse_tap_and_trim(host);
@@ -991,10 +1094,85 @@ static void tegra_sdhci_post_tuning(struct sdhci_host *host)
 	tegra_sdhci_set_tap(host, tegra_host->tuned_tap_delay);
 }
 
+static void tegra_sdhci_set_ddr200_tap(struct sdhci_host *host, unsigned int tap)
+{
+	u32 val = sdhci_readl(host, SDHCI_VNDR_TUN_CTRL0_0);
+
+	sdhci_writel(host, val & ~SDHCI_VNDR_TUN_CTRL0_TUN_HW_TAP,
+		     SDHCI_VNDR_TUN_CTRL0_0);
+	tegra_sdhci_set_tap(host, tap);
+	sdhci_writel(host, val | SDHCI_VNDR_TUN_CTRL0_TUN_HW_TAP,
+		     SDHCI_VNDR_TUN_CTRL0_0);
+}
+
+static int tegra_sdhci_execute_ddr200_tuning(struct sdhci_host *host, u32 opcode)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(pltfm_host);
+	unsigned int tap, start = 0, len = 0, best_start = 0, best_len = 0;
+	u32 val;
+	u16 ctrl;
+
+	tegra_host->ddr200_tap = 0;
+
+	val = sdhci_readl(host, SDHCI_VNDR_TUN_CTRL0_0);
+	val &= ~(SDHCI_VNDR_TUN_CTRL0_TUN_ITER_MASK |
+		 SDHCI_VNDR_TUN_CTRL0_MUL_M_MASK);
+	val |= TRIES_128 << SDHCI_VNDR_TUN_CTRL0_TUN_ITER_SHIFT |
+	       1 << SDHCI_VNDR_TUN_CTRL0_MUL_M_SHIFT;
+	sdhci_writel(host, val, SDHCI_VNDR_TUN_CTRL0_0);
+	sdhci_writel(host, 0, SDHCI_TEGRA_VNDR_TUN_CTRL1_0);
+
+	sdhci_start_tuning(host);
+
+	for (tap = 0; tap < TEGRA_SDHCI_DDR200_TAPS; tap++) {
+		tegra_sdhci_set_ddr200_tap(host, tap);
+		sdhci_send_tuning(host, opcode);
+		if (!host->tuning_done)
+			sdhci_reset(host, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+
+		ctrl = sdhci_readw(host, SDHCI_HOST_CONTROL2);
+		if (!host->tuning_done || !(ctrl & SDHCI_CTRL_TUNED_CLK)) {
+			len = 0;
+		} else {
+			if (!len++)
+				start = tap;
+
+			if (len > best_len) {
+				best_len = len;
+				best_start = start;
+			}
+		}
+
+		if (!(ctrl & SDHCI_CTRL_EXEC_TUNING))
+			break;
+	}
+
+	sdhci_end_tuning(host);
+
+	if (best_len < TEGRA_SDHCI_DDR200_MIN_WINDOW) {
+		sdhci_reset_tuning(host);
+		tegra_sdhci_set_tap(host, tegra_host->default_tap);
+		return -EIO;
+	}
+
+	tegra_host->ddr200_tap = best_start + best_len / 2;
+	tegra_sdhci_set_ddr200_tap(host, tegra_host->ddr200_tap);
+
+	dev_dbg(mmc_dev(host->mmc), "DDR200 tap %u, passing window %u-%u\n",
+		tegra_host->ddr200_tap, best_start, best_start + best_len - 1);
+
+	return 0;
+}
+
 static int tegra_sdhci_execute_hw_tuning(struct mmc_host *mmc, u32 opcode)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
 	int err;
+
+	if (mmc->ios.timing == MMC_TIMING_UHS_DDR50 &&
+	    mmc->ios.clock > UHS_DDR50_MAX_DTR)
+		return tegra_sdhci_execute_ddr200_tuning(host, opcode);
 
 	err = sdhci_execute_tuning(mmc, opcode);
 	if (!err && !host->tuning_err)
@@ -1015,6 +1193,9 @@ static void tegra_sdhci_set_uhs_signaling(struct sdhci_host *host,
 	u32 val;
 
 	tegra_host->ddr_signaling = false;
+	if (timing != MMC_TIMING_UHS_DDR50)
+		tegra_host->ddr200_tap = 0;
+
 	switch (timing) {
 	case MMC_TIMING_UHS_SDR50:
 		break;
@@ -1054,7 +1235,9 @@ static void tegra_sdhci_set_uhs_signaling(struct sdhci_host *host,
 
 	tegra_sdhci_pad_autocalib(host);
 
-	if (tegra_host->tuned_tap_delay && !set_default_tap)
+	if (timing == MMC_TIMING_UHS_DDR50 && tegra_host->ddr200_tap)
+		tegra_sdhci_set_ddr200_tap(host, tegra_host->ddr200_tap);
+	else if (tegra_host->tuned_tap_delay && !set_default_tap)
 		tegra_sdhci_set_tap(host, tegra_host->tuned_tap_delay);
 	else
 		tegra_sdhci_set_tap(host, tegra_host->default_tap);
@@ -1309,6 +1492,12 @@ static void tegra_sdhci_set_timeout(struct sdhci_host *host,
 	else
 		val &= ~SDHCI_MISC_CTRL_ERASE_TIMEOUT_LIMIT;
 	sdhci_writel(host, val, SDHCI_TEGRA_VENDOR_MISC_CTRL);
+
+	if (cmd && cmd->data && mmc_op_tuning(cmd->opcode)) {
+		sdhci_writeb(host, TEGRA_SDHCI_TUNING_TIMEOUT_COUNT,
+			     SDHCI_TIMEOUT_CONTROL);
+		return;
+	}
 
 	__sdhci_set_timeout(host, cmd);
 }
@@ -1593,6 +1782,25 @@ static int sdhci_tegra_add_host(struct sdhci_host *host)
 	bool dma64;
 	int ret;
 
+	if (!tegra_host->enable_hwcq && tegra_host->io_trim_active) {
+		/*
+		 * Tegra210 reports no MAX_CURRENT and the SD supply is a fixed
+		 * regulator, so the card would stay at its 200 mA default. L4T
+		 * runs this slot at 800 mA (max-current-800ma); DDR200 needs it.
+		 */
+		ret = sdhci_setup_host(host);
+		if (ret)
+			return ret;
+
+		host->mmc->max_current_180 = max(host->mmc->max_current_180, 800U);
+
+		ret = __sdhci_add_host(host);
+		if (ret)
+			sdhci_cleanup_host(host);
+
+		return ret;
+	}
+
 	if (!tegra_host->enable_hwcq)
 		return sdhci_add_host(host);
 
@@ -1705,6 +1913,22 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	host->mmc->caps |= MMC_CAP_CD_WAKE;
 
 	tegra_sdhci_parse_dt(host);
+
+	if (tegra_host->io_trim_active) {
+		mutex_init(&tegra_host->ddr200_emc_lock);
+		INIT_DELAYED_WORK(&tegra_host->ddr200_emc_release,
+				  tegra_sdhci_ddr200_emc_release);
+		tegra_host->ddr200_emc = devm_of_icc_get(&pdev->dev, "dma-mem");
+		if (IS_ERR(tegra_host->ddr200_emc)) {
+			rc = PTR_ERR(tegra_host->ddr200_emc);
+			if (rc == -EPROBE_DEFER)
+				goto err_power_req;
+			dev_warn(&pdev->dev, "DDR200 without EMC bandwidth: %d\n", rc);
+			tegra_host->ddr200_emc = NULL;
+		}
+		/* The request hook carries the EMC hold. */
+		host->mmc_host_ops.request = tegra_sdhci_request;
+	}
 
 	if (tegra_host->soc_data->nvquirks & NVQUIRK_PROGRAM_STREAMID &&
 	    !tegra_dev_iommu_get_stream_id(&pdev->dev, &tegra_host->stream_id)) {
@@ -1821,6 +2045,7 @@ static void sdhci_tegra_remove(struct platform_device *pdev)
 	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(pltfm_host);
 
 	sdhci_remove_host(host, 0);
+	tegra_sdhci_ddr200_emc_stop(tegra_host);
 
 	reset_control_assert(tegra_host->rst);
 	usleep_range(2000, 4000);
@@ -1852,7 +2077,10 @@ static int sdhci_tegra_runtime_resume(struct device *dev)
 static int sdhci_tegra_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(sdhci_priv(host));
 	int ret;
+
+	tegra_sdhci_ddr200_emc_stop(tegra_host);
 
 	if (host->mmc->caps2 & MMC_CAP2_CQE) {
 		ret = cqhci_suspend(host->mmc);

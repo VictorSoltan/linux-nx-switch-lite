@@ -25,7 +25,7 @@ static const struct reg_default tegra210_i2s_reg_defaults[] = {
 	{ TEGRA210_I2S_TX_CIF_CTRL, 0x00007700 },
 	{ TEGRA210_I2S_CG, 0x1 },
 	{ TEGRA210_I2S_TIMING, 0x0000001f },
-	{ TEGRA210_I2S_ENABLE, 0x1 },
+	{ TEGRA210_I2S_ENABLE, 0x0 },
 	/*
 	 * Below update does not have any effect on Tegra186 and Tegra194.
 	 * On Tegra210, I2S4 has "i2s4a" and "i2s4b" pins and below update
@@ -42,7 +42,7 @@ static const struct reg_default tegra264_i2s_reg_defaults[] = {
 	{ TEGRA264_I2S_TX_CIF_CTRL, 0x00003f00 },
 	{ TEGRA264_I2S_CG, 0x1 },
 	{ TEGRA264_I2S_TIMING, 0x0000001f },
-	{ TEGRA264_I2S_ENABLE, 0x1 },
+	{ TEGRA264_I2S_ENABLE, 0x0 },
 	{ TEGRA264_I2S_RX_FIFO_WR_ACCESS_MODE, 0x1 },
 	{ TEGRA264_I2S_TX_FIFO_RD_ACCESS_MODE, 0x1 },
 };
@@ -104,23 +104,22 @@ static int tegra210_i2s_sw_reset(struct snd_soc_component *compnt,
 	struct tegra210_i2s *i2s = dev_get_drvdata(dev);
 	unsigned int reset_mask = I2S_SOFT_RESET_MASK;
 	unsigned int reset_en = I2S_SOFT_RESET_EN;
-	unsigned int reset_reg, cif_reg, stream_reg;
-	unsigned int cif_ctrl, stream_ctrl, i2s_ctrl, val;
+	unsigned int tx_cif_reg = TEGRA210_I2S_TX_CIF_CTRL + i2s->soc_data->tx_offset;
+	unsigned int tx_ctrl_reg = TEGRA210_I2S_TX_CTRL + i2s->soc_data->tx_offset;
+	unsigned int reset_reg;
+	unsigned int rx_cif, tx_cif, rx_ctrl, tx_ctrl, i2s_ctrl, val;
 	int err;
 
-	if (stream == SNDRV_PCM_STREAM_PLAYBACK) {
+	if (stream == SNDRV_PCM_STREAM_PLAYBACK)
 		reset_reg = TEGRA210_I2S_RX_SOFT_RESET;
-		cif_reg = TEGRA210_I2S_RX_CIF_CTRL;
-		stream_reg = TEGRA210_I2S_RX_CTRL;
-	} else {
+	else
 		reset_reg = TEGRA210_I2S_TX_SOFT_RESET + i2s->soc_data->tx_offset;
-		cif_reg = TEGRA210_I2S_TX_CIF_CTRL + i2s->soc_data->tx_offset;
-		stream_reg = TEGRA210_I2S_TX_CTRL + i2s->soc_data->tx_offset;
-	}
 
-	/* Store CIF and I2S control values */
-	regmap_read(i2s->regmap, cif_reg, &cif_ctrl);
-	regmap_read(i2s->regmap, stream_reg, &stream_ctrl);
+	/* Store CIF and I2S control values of both paths, as L4T does */
+	regmap_read(i2s->regmap, TEGRA210_I2S_RX_CIF_CTRL, &rx_cif);
+	regmap_read(i2s->regmap, tx_cif_reg, &tx_cif);
+	regmap_read(i2s->regmap, TEGRA210_I2S_RX_CTRL, &rx_ctrl);
+	regmap_read(i2s->regmap, tx_ctrl_reg, &tx_ctrl);
 	regmap_read(i2s->regmap, TEGRA210_I2S_CTRL + i2s->soc_data->i2s_ctrl_offset, &i2s_ctrl);
 
 	/* Reset to make sure the previous transactions are clean */
@@ -136,8 +135,10 @@ static int tegra210_i2s_sw_reset(struct snd_soc_component *compnt,
 	}
 
 	/* Restore CIF and I2S control values */
-	regmap_write(i2s->regmap, cif_reg, cif_ctrl);
-	regmap_write(i2s->regmap, stream_reg, stream_ctrl);
+	regmap_write(i2s->regmap, TEGRA210_I2S_RX_CIF_CTRL, rx_cif);
+	regmap_write(i2s->regmap, tx_cif_reg, tx_cif);
+	regmap_write(i2s->regmap, TEGRA210_I2S_RX_CTRL, rx_ctrl);
+	regmap_write(i2s->regmap, tx_ctrl_reg, tx_ctrl);
 	regmap_write(i2s->regmap, TEGRA210_I2S_CTRL + i2s->soc_data->i2s_ctrl_offset, i2s_ctrl);
 
 	return 0;
@@ -202,6 +203,13 @@ static int tegra210_i2s_runtime_resume(struct device *dev)
 
 	regcache_cache_only(i2s->regmap, false);
 	regcache_sync(i2s->regmap);
+
+	/*
+	 * The hardware can come up with this bit clear, and the sync skips it
+	 * as equal to the reset default. Disabled, the I2S takes CIF data
+	 * without back-pressure, so the stream runs at the AHUB rate.
+	 */
+	regmap_write(i2s->regmap, i2s->soc_data->enable_reg, I2S_EN);
 
 	return 0;
 }
@@ -1135,6 +1143,7 @@ static const struct tegra_i2s_soc_data soc_data_tegra210 = {
 	.max_ch			= TEGRA210_I2S_MAX_CHANNEL,
 	.tx_offset		= TEGRA210_I2S_TX_OFFSET,
 	.i2s_ctrl_offset	= TEGRA210_I2S_CTRL_OFFSET,
+	.enable_reg		= TEGRA210_I2S_ENABLE,
 	.fsync_width_mask	= I2S_CTRL_FSYNC_WIDTH_MASK,
 	.fsync_width_shift	= I2S_FSYNC_WIDTH_SHIFT,
 	.slot_mask		= DEFAULT_I2S_SLOT_MASK,
@@ -1146,6 +1155,7 @@ static const struct tegra_i2s_soc_data soc_data_tegra264 = {
 	.max_ch			= TEGRA264_I2S_MAX_CHANNEL,
 	.tx_offset		= TEGRA264_I2S_TX_OFFSET,
 	.i2s_ctrl_offset	= TEGRA264_I2S_CTRL_OFFSET,
+	.enable_reg		= TEGRA264_I2S_ENABLE,
 	.fsync_width_mask	= TEGRA264_I2S_CTRL_FSYNC_WIDTH_MASK,
 	.fsync_width_shift	= TEGRA264_I2S_FSYNC_WIDTH_SHIFT,
 	.slot_mask		= TEGRA264_DEFAULT_I2S_SLOT_MASK,

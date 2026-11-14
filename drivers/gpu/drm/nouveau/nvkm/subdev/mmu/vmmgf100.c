@@ -77,6 +77,33 @@ gf100_vmm_pgt_dma(struct nvkm_vmm *vmm, struct nvkm_mmu_pt *pt,
 		return;
 	}
 
+	/* Tegra big pages over contiguous host chunks (mem.c). The BO offset
+	 * is already in map->dma (nvkm_vmm_map_locked); map->off then holds
+	 * its page-aligned part, which the 4K iterator below would add again.
+	 */
+	if (map->page->shift > PAGE_SHIFT) {
+		const u32 step = 1 << (map->page->shift - PAGE_SHIFT);
+
+		nvkm_kmap(pt->memory);
+		while (ptes--) {
+			u64 data = (*map->dma >> 8) | map->type;
+			u32 i = IS_ALIGNED(map->dma[0], 1ULL << map->page->shift) ? 1 : 0;
+
+			/* A big PTE must never reach past its own pages. */
+			while (i && i < step &&
+			       map->dma[i] == map->dma[0] + ((dma_addr_t)i << PAGE_SHIFT))
+				i++;
+			if (WARN_ONCE(i != step, "nouveau: big PTE over discontiguous dma %pad\n",
+				      &map->dma[0]))
+				data = 0;
+			VMM_WO064(pt, vmm, ptei++ * 8, data);
+			map->type += map->ctag;
+			map->dma += step;
+		}
+		nvkm_done(pt->memory);
+		return;
+	}
+
 	VMM_MAP_ITER_DMA(vmm, pt, ptei, ptes, map, gf100_vmm_pgt_pte);
 }
 
@@ -283,8 +310,14 @@ gf100_vmm_valid(struct nvkm_vmm *vmm, void *argv, u32 argc,
 		u32 comp = (page->shift == 16 && !gm20x) ? 16 : 17;
 		u32 tags = ALIGN(nvkm_memory_size(memory), 1 << 17) >> comp;
 		if (aper != 0 || !(page->type & NVKM_VMM_PAGE_COMP)) {
-			VMM_DEBUG(vmm, "comp %d %02x", aper, page->type);
-			return -EINVAL;
+			/* Tegra: memory without contiguous 128K chunks maps
+			 * with the incompressible kind, as L4T's fallback.
+			 */
+			if (device->type != NVKM_DEVICE_TEGRA) {
+				VMM_DEBUG(vmm, "comp %d %02x", aper, page->type);
+				return -EINVAL;
+			}
+			map->no_comp = true;
 		}
 
 		if (!map->no_comp) {

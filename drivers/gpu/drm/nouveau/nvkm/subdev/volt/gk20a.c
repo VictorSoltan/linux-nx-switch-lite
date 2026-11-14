@@ -23,6 +23,9 @@
 #include "priv.h"
 
 #include <core/tegra.h>
+#include <subdev/clk.h>
+#include <linux/of.h>
+#include <linux/thermal.h>
 
 #include "gk20a.h"
 
@@ -168,6 +171,280 @@ gk20a_volt_ctor(struct nvkm_device *device, enum nvkm_subdev_type type, int inst
 			   volt->base.vid[i].vid, volt->base.vid[i].uv);
 	}
 
+	return 0;
+}
+
+/* Inserted into volt/gk20a.c. NVIDIA CVB ranges; only the clock worker
+ * changes live VIDs. Thermal callbacks never write a regulator directly.
+ */
+#define B01_THERM_STATES 6
+#define B01_THERM_VIDS 32
+
+static void gk20a_volt_thermal_table(struct gk20a_volt *volt, unsigned int state)
+{
+	int i;
+
+	for (i = 0; i < volt->base.vid_nr; i++)
+		volt->base.vid[i].uv = volt->thermal_uv[state][i];
+}
+
+static int gk20a_volt_thermal_prepare(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	unsigned int state = READ_ONCE(volt->thermal_requested);
+
+	if (!volt->thermal_cdev || !READ_ONCE(volt->thermal_live) ||
+	    state == READ_ONCE(volt->thermal_applied))
+		return 0;
+
+	volt->thermal_next = state;
+	gk20a_volt_thermal_table(volt, state);
+	return 1;
+}
+
+static void gk20a_volt_thermal_complete(struct nvkm_volt *base, int error)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+
+	if (error)
+		gk20a_volt_thermal_table(volt, volt->thermal_applied);
+	else
+		WRITE_ONCE(volt->thermal_applied, volt->thermal_next);
+}
+
+static int gk20a_volt_thermal_max(struct thermal_cooling_device *cdev,
+				unsigned long *state)
+{
+	*state = B01_THERM_STATES - 1;
+	return 0;
+}
+
+static int gk20a_volt_thermal_get(struct thermal_cooling_device *cdev,
+				unsigned long *state)
+{
+	struct gk20a_volt *volt = cdev->devdata;
+
+	*state = READ_ONCE(volt->thermal_applied);
+	return 0;
+}
+
+static int gk20a_volt_thermal_set(struct thermal_cooling_device *cdev,
+				unsigned long state)
+{
+	struct gk20a_volt *volt = cdev->devdata;
+	struct nvkm_clk *clk = volt->base.subdev.device->clk;
+	int ret = 0;
+
+	if (state >= B01_THERM_STATES)
+		return -EINVAL;
+
+	/* Serialise callbacks with clock fini. The worker does not take this
+	 * lock, or the synchronous completion would deadlock thermal updates.
+	 */
+	mutex_lock(&volt->thermal_lock);
+	WRITE_ONCE(volt->thermal_requested, state);
+	if (volt->thermal_live && state != volt->thermal_applied) {
+		ret = nvkm_clk_update_volt(clk);
+		if (READ_ONCE(volt->thermal_applied) != state)
+			ret = ret ?: -EAGAIN;
+	}
+	mutex_unlock(&volt->thermal_lock);
+	return ret;
+}
+
+static const struct thermal_cooling_device_ops gk20a_volt_thermal_ops = {
+	.get_max_state = gk20a_volt_thermal_max,
+	.get_cur_state = gk20a_volt_thermal_get,
+	.set_cur_state = gk20a_volt_thermal_set,
+};
+
+static int gk20a_volt_thermal_oneinit(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	struct device_node *np;
+
+	/* No matching DT node retains the accepted static peak table. */
+	np = of_find_compatible_node(NULL, NULL,
+				     "nvidia,tegra210-rail-scaling-cdev");
+	if (!np)
+		return 0;
+	if (of_device_is_available(np)) {
+		volt->thermal_cdev = thermal_of_cooling_device_register(np, 0,
+			"gpu_scaling", volt, &gk20a_volt_thermal_ops);
+		if (IS_ERR(volt->thermal_cdev)) {
+			int ret = PTR_ERR(volt->thermal_cdev);
+
+			volt->thermal_cdev = NULL;
+			of_node_put(np);
+			return ret;
+		}
+	}
+	of_node_put(np);
+	return 0;
+}
+
+static int gk20a_volt_thermal_init(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	int i, uv = 0;
+
+	if (!volt->thermal_cdev)
+		return 0;
+
+	/* Boot/resume starts cold. Only a new valid thermal request can leave
+	 * this profile. Raise voltage before clock/NA initialisation, when the
+	 * boot clock is not yet known to the clock subdevice.
+	 */
+	mutex_lock(&volt->thermal_lock);
+	WRITE_ONCE(volt->thermal_live, false);
+	WRITE_ONCE(volt->thermal_applied, 0);
+	gk20a_volt_thermal_table(volt, 0);
+	for (i = 0; i < base->vid_nr; i++)
+		uv = max(uv, (int)base->vid[i].uv);
+	mutex_unlock(&volt->thermal_lock);
+	return regulator_set_voltage(volt->vdd, uv, 1200000);
+}
+
+static int gk20a_volt_thermal_active(struct nvkm_volt *base, bool live)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	int ret = 0;
+
+	mutex_lock(&volt->thermal_lock);
+	if (!live) {
+		WRITE_ONCE(volt->thermal_requested, 0);
+		/* Platform sleep only suspends devfreq; it need not fini NVKM.
+		 * Establish the cold profile while MMIO is still available.
+		 */
+		if (volt->thermal_live && volt->thermal_applied) {
+			ret = nvkm_clk_update_volt(base->subdev.device->clk);
+			if (volt->thermal_applied)
+				ret = ret ?: -EAGAIN;
+		}
+		if (!ret)
+			WRITE_ONCE(volt->thermal_live, false);
+	} else {
+		WRITE_ONCE(volt->thermal_live, true);
+		if (volt->thermal_requested != volt->thermal_applied)
+			ret = nvkm_clk_update_volt(base->subdev.device->clk);
+	}
+	mutex_unlock(&volt->thermal_lock);
+	return ret;
+}
+
+static void gk20a_volt_thermal_dtor(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+
+	if (volt->thermal_cdev)
+		thermal_cooling_device_unregister(volt->thermal_cdev);
+	mutex_destroy(&volt->thermal_lock);
+}
+
+static int gk20a_volt_thermal_build(struct gk20a_volt *volt,
+		const struct cvb_coef *coefs, int count, int vmin, int scale)
+{
+	/* Original NVIDIA ranges -25/20/30/50/70/90C. Two extra degrees at
+	 * the lower edge cover the DT hysteresis while the board cools.
+	 * State 5 is the conservative fallback above the characterised range.
+	 */
+	static const int low[] = { -25, 18, 28, 48, 68, -25 };
+	static const int high[] = { 20, 30, 50, 70, 90, 90 };
+	struct nvkm_device *device = volt->base.subdev.device;
+	int state, i, j, t, uv, candidate, best;
+	int selectors = regulator_count_voltages(volt->vdd);
+
+	if (count > B01_THERM_VIDS || selectors <= 0)
+		return -EINVAL;
+
+	for (state = 0; state < B01_THERM_STATES; state++) {
+		for (i = 0; i < count; i++) {
+			uv = state == 0 ? max(vmin, 800000) : vmin;
+			for (t = low[state]; t <= high[state]; t++) {
+				candidate = gk20a_volt_get_cvb_t_voltage(
+					device->func->tegra(device)->gpu_speedo,
+					t, 100, scale, &coefs[i]);
+				uv = max(uv, DIV_ROUND_UP(candidate, 1000) * 1000);
+			}
+			best = INT_MAX;
+			for (j = 0; j < selectors; j++) {
+				candidate = regulator_list_voltage(volt->vdd, j);
+				if (candidate >= uv && candidate < best)
+					best = candidate;
+			}
+			if (best == INT_MAX || best > 1200000)
+				return -EINVAL;
+			if (i)
+				best = max(best, (int)volt->thermal_uv[state][i - 1]);
+			volt->thermal_uv[state][i] = best;
+		}
+	}
+	mutex_init(&volt->thermal_lock);
+	return 0;
+}
+
+static const struct nvkm_volt_func gk20a_volt_b01 = {
+	.oneinit = gk20a_volt_thermal_oneinit,
+	.init = gk20a_volt_thermal_init,
+	.dtor = gk20a_volt_thermal_dtor,
+	.prepare = gk20a_volt_thermal_prepare,
+	.complete = gk20a_volt_thermal_complete,
+	.active = gk20a_volt_thermal_active,
+	.vid_get = gk20a_volt_vid_get,
+	.vid_set = gk20a_volt_vid_set,
+	.set_id = gk20a_volt_set_id,
+};
+
+int
+gk20a_volt_ctor_b01(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
+		   const struct cvb_coef *coefs, int nb_coefs,
+		   int vmin, int thermal_scale, struct gk20a_volt *volt)
+{
+	int i, j, t, uv, candidate, count, best, ret;
+
+	ret = gk20a_volt_ctor(device, type, inst, coefs, nb_coefs, vmin, volt);
+	if (ret)
+		return ret;
+
+	count = regulator_count_voltages(volt->vdd);
+	if (count <= 0)
+		return count ?: -EINVAL;
+
+	for (i = 0; i < nb_coefs; i++) {
+		/* Use the worst CVB voltage over the board's operating range.
+		 * No temperature poller or userspace voltage writer is needed.
+		 */
+		uv = vmin;
+		for (t = -10; t <= 90; t++) {
+			candidate = gk20a_volt_get_cvb_t_voltage(
+				device->func->tegra(device)->gpu_speedo,
+				t, 100, thermal_scale, &coefs[i]);
+			uv = max(uv, DIV_ROUND_UP(candidate, 1000) * 1000);
+		}
+
+		/* NA calibration must use an actual regulator selector, not
+		 * an unrepresentable CVB value (e.g. 677mV on a 5mV rail).
+		 */
+		best = INT_MAX;
+		for (j = 0; j < count; j++) {
+			candidate = regulator_list_voltage(volt->vdd, j);
+			if (candidate >= uv && candidate < best)
+				best = candidate;
+		}
+		if (best == INT_MAX || best > 1200000)
+			return -EINVAL;
+		if (i)
+			best = max(best, (int)volt->base.vid[i - 1].uv);
+		volt->base.vid[i].uv = best;
+	}
+
+	ret = gk20a_volt_thermal_build(volt, coefs, nb_coefs, vmin, thermal_scale);
+	if (ret)
+		return ret;
+	for (i = 0; i < nb_coefs; i++)
+		volt->thermal_ref[i] = volt->base.vid[i].uv;
+	volt->base.vid_ref = volt->thermal_ref;
+	volt->base.func = &gk20a_volt_b01;
 	return 0;
 }
 

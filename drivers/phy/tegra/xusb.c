@@ -621,6 +621,8 @@ static void tegra_xusb_usb_phy_work(struct work_struct *work)
 						    usb_phy_work);
 	enum usb_role role = usb_role_switch_get_role(port->usb_role_sw);
 
+	dev_info(&port->dev, "NXROLE: role=%s event=%d\n",
+		 usb_roles[role], to_usb_phy_event(role));
 	usb_phy_set_event(&port->usb_phy, to_usb_phy_event(role));
 
 	dev_dbg(&port->dev, "%s(): calling notifier for role %s\n", __func__,
@@ -749,6 +751,32 @@ static void tegra_xusb_parse_usb_role_default_mode(struct tegra_xusb_port *port)
 		dev_dbg(&port->dev, "usb role default mode is %s", modes[mode]);
 	}
 }
+
+/*
+ * Wait for the previous controller to yield the USB2 PHY before a new role
+ * takes ownership. Based on the Tegra role-switching v2 fix series.
+ */
+bool tegra_xusb_usb2_port_wait_role_none(struct tegra_xusb_padctl *padctl, int index)
+{
+	struct tegra_xusb_usb2_port *usb2 = tegra_xusb_find_usb2_port(padctl, index);
+	int retries = 5;
+
+	if (!usb2) {
+		dev_err(padctl->dev, "no port found for USB2 lane %u\n", index);
+		return false;
+	}
+
+	do {
+		if (usb2->role == USB_ROLE_NONE)
+			return true;
+
+		usleep_range(50, 60);
+	} while (retries--);
+
+	dev_err(&usb2->base.dev, "timed out waiting for USB_ROLE_NONE\n");
+	return false;
+}
+EXPORT_SYMBOL_GPL(tegra_xusb_usb2_port_wait_role_none);
 
 static int tegra_xusb_usb2_port_parse_dt(struct tegra_xusb_usb2_port *usb2)
 {

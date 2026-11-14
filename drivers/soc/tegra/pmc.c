@@ -2153,6 +2153,8 @@ reg_update:
 	return 0;
 }
 
+static struct device *tegra_pmc_bootrom_dev;
+
 int tegra_pmc_edit_bootrom_scratch_poff(struct device *dev,
 		struct tegra_br_cmd_cfg *bcfg,
 		u32 bcfg_size)
@@ -2171,7 +2173,8 @@ int tegra_pmc_edit_bootrom_scratch_reset(struct device *dev,
 		u32 bcfg_size)
 {
 	if (br_rst_commands) {
-		tegra_pmc_configure_bootrom_scratch(dev, br_rst_commands,
+		tegra_pmc_configure_bootrom_scratch(dev ?: tegra_pmc_bootrom_dev,
+						    br_rst_commands,
 						    bcfg, bcfg_size);
 		return 0;
 	}
@@ -2199,8 +2202,6 @@ static int tegra_pmc_init_bootrom_power_off_cmd(struct device *dev)
 
 	return 0;
 }
-
-static struct device *tegra_pmc_bootrom_dev;
 
 static void tegra_pmc_soc_power_off(void)
 {
@@ -2270,7 +2271,9 @@ static int tegra_pmc_parse_dt(struct tegra_pmc *pmc, struct device_node *np)
 		}
 	}
 
-	pmc->suspend_mode = tegra_pm_validate_suspend_mode(pmc->suspend_mode);
+	/* The arm64 stub would drop the core timers SC7 needs from init */
+	if (IS_ENABLED(CONFIG_ARM))
+		pmc->suspend_mode = tegra_pm_validate_suspend_mode(pmc->suspend_mode);
 
 	if (of_property_read_u32(np, "nvidia,cpu-pwr-good-time", &value))
 		pmc->suspend_mode = TEGRA_SUSPEND_NONE;
@@ -3550,6 +3553,9 @@ static int tegra_pmc_probe(struct platform_device *pdev)
 	if (err < 0)
 		goto cleanup_powergates;
 
+	/* The bootrom command code reads it back through the device */
+	platform_set_drvdata(pdev, pmc);
+
 	if (pmc->soc->has_bootrom_command)
 		tegra_pmc_init_bootrom_cmds(&pdev->dev);
 
@@ -3804,6 +3810,16 @@ static void tegra20_pmc_init(struct tegra_pmc *pmc)
 		tegra_pmc_writel(pmc, ((osc << 8) & 0xff00) | (pmu & 0xff),
 				 PMC_COREPWRGOOD_TIMER);
 		tegra_pmc_writel(pmc, off, PMC_COREPWROFF_TIMER);
+
+		/* On arm64 nothing else programs them for firmware SC7 entry */
+		if (IS_ENABLED(CONFIG_ARM64)) {
+			tegra_pmc_writel(pmc,
+					 DIV_ROUND_UP(pmc->cpu_good_time * 32768, 1000000),
+					 PMC_CPUPWRGOOD_TIMER);
+			tegra_pmc_writel(pmc,
+					 DIV_ROUND_UP(pmc->cpu_off_time * 32768, 1000000),
+					 PMC_CPUPWROFF_TIMER);
+		}
 	}
 }
 

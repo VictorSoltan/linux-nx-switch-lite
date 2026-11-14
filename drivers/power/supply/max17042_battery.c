@@ -128,6 +128,43 @@ static int max17042_get_temperature(struct max17042_chip *chip, int *temp)
 	return 0;
 }
 
+/*
+ * Nintendo Switch MAX17050: report the ModelGauge m3 mixed estimate.
+ *
+ * HOS rewrites FullCAP/FullCAPNom with its table value on boot, and under
+ * Linux loads the end-of-charge learning (FullCAP := RepCap) shrinks FullCAP
+ * while RepSOC follows the load-compensated AvSOC, so RepSOC steps by tens
+ * of percent when a game starts.  MixCap/FullCAP0 (MixSOC) is the gauge's
+ * own coulomb + voltage estimate and does not depend on FullCAP.  The cell
+ * is charged to 4.208 V, which the model places at ~90% of FullCAP0, so that
+ * point is reported as full.
+ */
+#define MAX17050_FULL_CHARGE_PERCENT	90
+
+static bool max17042_use_mix(struct max17042_chip *chip)
+{
+	return chip->enable_current_sense &&
+	       chip->chip_type == MAXIM_DEVICE_TYPE_MAX17050;
+}
+
+static int max17042_get_mix(struct max17042_chip *chip, u32 *now, u32 *full)
+{
+	int ret;
+
+	ret = regmap_read(chip->regmap, MAX17042_FullCAP0, full);
+	if (ret < 0)
+		return ret;
+	*full = *full * MAX17050_FULL_CHARGE_PERCENT / 100;
+	if (!*full)
+		return -ENODATA;
+
+	ret = regmap_read(chip->regmap, MAX17042_RemCap, now);
+	if (ret < 0)
+		return ret;
+	*now = min(*now, *full);
+	return 0;
+}
+
 static int max17042_get_status(struct max17042_chip *chip, int *status)
 {
 	int ret, charge_full, charge_now;
@@ -333,6 +370,15 @@ static int max17042_get_property(struct power_supply *psy,
 		val->intval = data * MAX17042_VOLTAGE_LSB;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
+		if (max17042_use_mix(chip)) {
+			u32 full;
+
+			ret = max17042_get_mix(chip, &data, &full);
+			if (ret < 0)
+				return ret;
+			val->intval = data * 100 / full;
+			break;
+		}
 		if (chip->enable_current_sense)
 			ret = regmap_read(map, MAX17042_RepSOC, &data);
 		else
@@ -354,7 +400,13 @@ static int max17042_get_property(struct power_supply *psy,
 		val->intval = data64;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		ret = regmap_read(map, MAX17042_FullCAP, &data);
+		if (max17042_use_mix(chip)) {
+			u32 now;
+
+			ret = max17042_get_mix(chip, &now, &data);
+		} else {
+			ret = regmap_read(map, MAX17042_FullCAP, &data);
+		}
 		if (ret < 0)
 			return ret;
 
@@ -365,7 +417,13 @@ static int max17042_get_property(struct power_supply *psy,
 		val->intval = data64;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
-		ret = regmap_read(map, MAX17042_RepCap, &data);
+		if (max17042_use_mix(chip)) {
+			u32 full;
+
+			ret = max17042_get_mix(chip, &data, &full);
+		} else {
+			ret = regmap_read(map, MAX17042_RepCap, &data);
+		}
 		if (ret < 0)
 			return ret;
 
@@ -1064,6 +1122,10 @@ static const struct regmap_config max17042_regmap_config = {
 	.name = "max17042",
 	.reg_bits = 8,
 	.val_bits = 16,
+	/* The 8-bit register space also includes the SOC/calibration registers.
+	 * Without its upper bound, regmap debugfs exposes only register 0.
+	 */
+	.max_register = MAX17042_VFSOC,
 	.val_format_endian = REGMAP_ENDIAN_NATIVE,
 };
 

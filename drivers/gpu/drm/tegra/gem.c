@@ -467,6 +467,9 @@ static struct tegra_bo *tegra_bo_import(struct drm_device *drm,
 	if (IS_ERR(bo))
 		return bo;
 
+	/* Flips wait on the fences of the exporter, as in drm_gem_prime_import_dev() */
+	bo->gem.resv = buf->resv;
+
 	/*
 	 * If we need to use IOMMU API to map the dma-buf into the internally managed
 	 * domain, map it first to the DRM device to get an sgt.

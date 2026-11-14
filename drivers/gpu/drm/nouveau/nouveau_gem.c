@@ -54,6 +54,7 @@ static vm_fault_t nouveau_ttm_fault(struct vm_fault *vmf)
 	if (ret)
 		goto error_unlock;
 
+	nouveau_bo_cpu_mapped(nouveau_bo(bo));
 	nouveau_bo_del_io_reserve_lru(bo);
 	prot = vm_get_page_prot(vma->vm_flags);
 	ret = ttm_bo_vm_fault_reserved(vmf, prot, TTM_BO_VM_NUM_PREFAULT);
@@ -214,6 +215,14 @@ nouveau_gem_object_close(struct drm_gem_object *gem, struct drm_file *file_priv)
 	ttm_bo_unreserve(&nvbo->bo);
 }
 
+static int
+nouveau_gem_vmap(struct drm_gem_object *obj, struct iosys_map *map)
+{
+	nouveau_bo_cpu_mapped(nouveau_gem_object(obj));
+
+	return drm_gem_ttm_vmap(obj, map);
+}
+
 const struct drm_gem_object_funcs nouveau_gem_object_funcs = {
 	.free = nouveau_gem_object_del,
 	.open = nouveau_gem_object_open,
@@ -222,7 +231,7 @@ const struct drm_gem_object_funcs nouveau_gem_object_funcs = {
 	.pin = nouveau_gem_prime_pin,
 	.unpin = nouveau_gem_prime_unpin,
 	.get_sg_table = nouveau_gem_prime_get_sg_table,
-	.vmap = drm_gem_ttm_vmap,
+	.vmap = nouveau_gem_vmap,
 	.vunmap = drm_gem_ttm_vunmap,
 	.mmap = drm_gem_ttm_mmap,
 	.vm_ops = &nouveau_ttm_vm_ops,
@@ -693,6 +702,7 @@ nouveau_gem_pushbuf_reloc_apply(struct nouveau_cli *cli,
 			break;
 		}
 
+		nouveau_bo_cpu_mapped(nvbo);
 		if (!nvbo->kmap.virtual) {
 			ret = ttm_bo_kmap(&nvbo->bo, 0, PFN_UP(nvbo->bo.base.size),
 					  &nvbo->kmap);

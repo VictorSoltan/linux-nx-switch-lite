@@ -15,6 +15,7 @@ struct nvkm_device_tegra {
 	struct clk *clk;
 	struct clk *clk_ref;
 	struct clk *clk_pwr;
+	struct clk *clk_fuse;
 
 	struct regulator *vdd;
 
@@ -33,6 +34,7 @@ struct nvkm_device_tegra {
 
 	int gpu_speedo;
 	int gpu_speedo_id;
+	bool clkgating;
 };
 
 struct nvkm_device_tegra_func {

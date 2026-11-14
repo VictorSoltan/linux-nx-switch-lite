@@ -49,11 +49,71 @@ static const struct regmap_range_cfg rt5640_ranges[] = {
 };
 
 static const struct reg_sequence init_list[] = {
+	{RT5640_PR_BASE + 0x1d,	0x0347},
 	{RT5640_PR_BASE + 0x3d,	0x3600},
 	{RT5640_PR_BASE + 0x12,	0x0aa8},
-	{RT5640_PR_BASE + 0x14,	0x0aaa},
+	{RT5640_PR_BASE + 0x14,	0x8aaa},
+	{RT5640_PR_BASE + 0x20,	0x6110}, /* Class-D Amp tuning */
 	{RT5640_PR_BASE + 0x21,	0xe0e0},
 	{RT5640_PR_BASE + 0x23,	0x1804},
+};
+
+/* Nintendo Switch Lite EQ presets */
+static const struct reg_sequence eq_speakers_list_vali[] = {
+	/* EQ LPF Bandwidth  (LPF:a1)  from 0.88 to 0.268 */
+	{RT5640_PR_BASE + RT5640_EQ_BW_LOP,  0x0893},
+	/* EQ LPF Gain       (LPF:H0)  from 0.06 to 0.000 */
+	{RT5640_PR_BASE + RT5640_EQ_GN_LOP,  0x0000},
+
+	/* Reset Bands 1 to 4 */
+	{RT5640_PR_BASE + RT5640_EQ_FC_BP1,  0xc5e9},
+	{RT5640_PR_BASE + RT5640_EQ_BW_BP1,  0x1a98},
+	{RT5640_PR_BASE + RT5640_EQ_GN_BP1,  0x1d2c},
+	{RT5640_PR_BASE + RT5640_EQ_FC_BP2,  0xc882},
+	{RT5640_PR_BASE + RT5640_EQ_BW_BP2,  0x1c10},
+	{RT5640_PR_BASE + RT5640_EQ_GN_BP2,  0x01f4},
+	{RT5640_PR_BASE + RT5640_EQ_FC_BP3,  0xe904},
+	{RT5640_PR_BASE + RT5640_EQ_BW_BP3,  0x1c10},
+	{RT5640_PR_BASE + RT5640_EQ_GN_BP3,  0x01f4},
+	{RT5640_PR_BASE + RT5640_EQ_FC_BP4,  0xe904},
+	{RT5640_PR_BASE + RT5640_EQ_BW_BP4,  0x1c10},
+	{RT5640_PR_BASE + RT5640_EQ_GN_BP4,  0x01f4},
+	{RT5640_PR_BASE + RT5640_EQ_FC_HIP1, 0x1c10},
+	{RT5640_PR_BASE + RT5640_EQ_GN_HIP1, 0x01f4},
+
+	/* EQ HPF2 Cutoff    (HPF2:a1) from 1.00 to  0.991 */
+	{RT5640_PR_BASE + RT5640_EQ_FC_HIP2, 0x1fb4},
+	/* EQ HPF2 Bandwidth (HPF2:a2) from 0.00 to  0.009 */
+	{RT5640_PR_BASE + RT5640_EQ_BW_HIP2, 0x004b},
+	/* EQ HPF2 Gain      (HPF2:H0) from 1.00 to  0.991 */
+	{RT5640_PR_BASE + RT5640_EQ_GN_HIP2, 0x1fb4},
+
+	/* EQ Pre  Volume reset val 1.0/0dB */
+	{RT5640_PR_BASE + RT5640_EQ_PRE_VOL, 0x0800},
+	/* EQ Post Volume reset val 1.0/0dB */
+	{RT5640_PR_BASE + RT5640_EQ_PST_VOL, 0x0800},
+
+	/* Enable LPF (1st order Butterworth) and HPF2 (2nd order Butterworth) */
+	{RT5640_EQ_CTRL2,                    0x00c1},
+	/* Enable for DAC and update EQ parameters */
+	{RT5640_EQ_CTRL1,                    0x6041},
+
+	/* Enable DRC/AGC Compression Function */
+	{RT5640_DRC_AGC_2,                   0x1f80},
+	/* DRC/AGC Limiter Level: -13.5dBFS */
+	{RT5640_DRC_AGC_3,                   0x0480},
+	/* DRC/AGC recovery: 5.46s, DRC/AGC Sample Rate Change 48kHz, DRC/AGC attack: 170ms */
+	/* Update all DRC/AGC Parameters, enable DRC to DAC Path */
+	{RT5640_DRC_AGC_1,                   0x6b30},
+};
+
+static const struct reg_sequence eq_normal_list_nx[] = {
+	/* Disable hardware EQ */
+	{RT5640_EQ_CTRL2,                    0x0000},
+	{RT5640_EQ_CTRL1,                    0x6000},
+
+	/* Reset compressor to defaults */
+	{RT5640_DRC_AGC_1,                   0x2206},
 };
 
 static const struct reg_default rt5640_reg[] = {
@@ -988,6 +1048,37 @@ static int rt5640_hp_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int rt5640_spk_event(struct snd_soc_dapm_widget *w,
+			    struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
+	int ret = 0;
+
+	if (!rt5640->speaker_eq)
+		return 0;
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		ret = regmap_multi_reg_write(rt5640->regmap, eq_speakers_list_vali,
+					     ARRAY_SIZE(eq_speakers_list_vali));
+		break;
+
+	case SND_SOC_DAPM_PRE_PMD:
+		ret = regmap_multi_reg_write(rt5640->regmap, eq_normal_list_nx,
+					     ARRAY_SIZE(eq_normal_list_nx));
+		break;
+
+	default:
+		return 0;
+	}
+
+	if (ret)
+		dev_warn(component->dev, "Failed to set speaker EQ: %d\n", ret);
+
+	return 0;
+}
+
 static int rt5640_lout_event(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
 {
@@ -1249,7 +1340,8 @@ static const struct snd_soc_dapm_widget rt5640_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY("HP R Amp", RT5640_PWR_ANLG1,
 		RT5640_PWR_HP_R_BIT, 0, NULL, 0),
 	SND_SOC_DAPM_SUPPLY("Improve SPK Amp Drv", RT5640_PWR_DIG1,
-		RT5640_PWR_CLS_D_BIT, 0, NULL, 0),
+		RT5640_PWR_CLS_D_BIT, 0, rt5640_spk_event,
+		SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
 
 	/* Output Switch */
 	SND_SOC_DAPM_SWITCH("Speaker L Playback", SND_SOC_NOPM, 0, 0,
@@ -2745,6 +2837,19 @@ static int rt5640_probe(struct snd_soc_component *component)
 	if (dmic_en)
 		rt5640_dmic_enable(component, dmic1_data_pin, dmic2_data_pin);
 
+	rt5640->speaker_eq = device_property_read_bool(component->dev,
+						       "realtek,speaker-eq");
+
+	/* L4T state for the Lite: RT5639 path defaults and JD1 as the jack input. */
+	if (rt5640->speaker_eq) {
+		snd_soc_component_update_bits(component, RT5640_GCTL1, 0x0100, 0);
+		snd_soc_component_write(component, RT5640_GCTL2, 0x0000);
+		snd_soc_component_update_bits(component, RT5640_MICBIAS, 0x0030, 0);
+		snd_soc_component_update_bits(component, RT5640_DSP_PATH2, 0xfc00, 0xa000);
+		snd_soc_component_update_bits(component, RT5640_JD_CTRL, RT5640_JD_MASK,
+					      RT5640_JD_GPIO2);
+	}
+
 	if (device_property_read_u32(component->dev,
 				     "realtek,jack-detect-source", &val) == 0) {
 		if (val <= RT5640_JD_SRC_HDA_HEADER)
@@ -3042,6 +3147,14 @@ static int rt5640_i2c_probe(struct i2c_client *i2c)
 
 	regmap_update_bits(rt5640->regmap, RT5640_GCTL1,
 				RT5640_MCLK_DET, RT5640_MCLK_DET);
+
+	/* Set Class D to stereo and enable auto over-current protection. */
+	if (device_property_read_bool(&i2c->dev, "realtek,speaker-eq")) {
+		regmap_update_bits(rt5640->regmap, RT5640_CLS_D_OUT,
+				   RT5640_CLSD_OM_MASK, RT5640_CLSD_OM_STO);
+		regmap_update_bits(rt5640->regmap, RT5640_CLS_D_OVCD,
+				   RT5640_AUTO_PD_MASK, RT5640_AUTO_PD_EN);
+	}
 
 	rt5640->hp_mute = true;
 	rt5640->irq = i2c->irq;

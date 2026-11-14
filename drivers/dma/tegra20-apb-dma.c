@@ -104,6 +104,9 @@
  */
 #define TEGRA_APBDMA_BURST_COMPLETE_TIME	20
 
+/* Keep the controller clock on between closely spaced transfers. */
+#define TEGRA_APBDMA_AUTOSUSPEND_MS		100
+
 /* Channel base address offset from APBDMA base address */
 #define TEGRA_APBDMA_CHANNEL_BASE_ADD_OFFSET	0x1000
 
@@ -554,7 +557,7 @@ static bool handle_continuous_head_request(struct tegra_dma_channel *tdc,
 	hsgreq = list_first_entry(&tdc->pending_sg_req, typeof(*hsgreq), node);
 	if (!hsgreq->configured) {
 		tegra_dma_stop(tdc);
-		pm_runtime_put(tdc->tdma->dev);
+		pm_runtime_put_autosuspend(tdc->tdma->dev);
 		dev_err(tdc2dev(tdc), "DMA transfer underflow, aborting DMA\n");
 		tegra_dma_abort_all(tdc);
 		return false;
@@ -594,7 +597,7 @@ static void handle_once_dma_done(struct tegra_dma_channel *tdc,
 		return;
 
 	if (list_empty(&tdc->pending_sg_req)) {
-		pm_runtime_put(tdc->tdma->dev);
+		pm_runtime_put_autosuspend(tdc->tdma->dev);
 		return;
 	}
 
@@ -772,7 +775,7 @@ static int tegra_dma_terminate_all(struct dma_chan *dc)
 	}
 	tegra_dma_resume(tdc);
 
-	pm_runtime_put(tdc->tdma->dev);
+	pm_runtime_put_autosuspend(tdc->tdma->dev);
 	wake_up_all(&tdc->wq);
 
 skip_dma_stop:
@@ -821,7 +824,7 @@ static void tegra_dma_synchronize(struct dma_chan *dc)
 
 	tasklet_kill(&tdc->tasklet);
 
-	pm_runtime_put(tdc->tdma->dev);
+	pm_runtime_put_autosuspend(tdc->tdma->dev);
 }
 
 static unsigned int tegra_dma_sg_bytes_xferred(struct tegra_dma_channel *tdc,
@@ -1475,6 +1478,12 @@ static int tegra_dma_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_clk_unprepare;
 
+	/*
+	 * A client that polls every few ms (the Switch Lite pad MCU on UART)
+	 * otherwise queues an idle request on pm_wq after every transfer.
+	 */
+	pm_runtime_set_autosuspend_delay(&pdev->dev, TEGRA_APBDMA_AUTOSUSPEND_MS);
+	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_irq_safe(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
@@ -1573,6 +1582,7 @@ err_unregister_dma_dev:
 	dma_async_device_unregister(&tdma->dma_dev);
 
 err_pm_disable:
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 
 err_clk_unprepare:
@@ -1587,6 +1597,7 @@ static void tegra_dma_remove(struct platform_device *pdev)
 
 	of_dma_controller_free(pdev->dev.of_node);
 	dma_async_device_unregister(&tdma->dma_dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	clk_unprepare(tdma->dma_clk);
 }

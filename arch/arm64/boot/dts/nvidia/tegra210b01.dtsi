@@ -35,6 +35,11 @@
 		compatible = "nvidia,tegra210b01-car";
 	};
 
+	actmon@6000c800 {
+		/* Observe the same firmware clock that the EMC ICC provider sets. */
+		clocks = <&tegra_car TEGRA210_CLK_ACTMON>, <&bpmp 0>;
+	};
+
 	pinmux@700008d4 {
 		status = "okay";
 		sdmmc1_1v8_drv: pinmux-sdmmc1-1v8-drv {
@@ -134,6 +139,14 @@
 
 	padctl@7009f000 {
 		compatible = "nvidia,tegra210b01-xusb-padctl";
+		/* Mariko PCIe UPHY calibration needs the additional 102 MHz clock. */
+		pads {
+			pcie {
+				clocks = <&tegra_car TEGRA210_CLK_PLL_E>,
+					 <&tegra_car TEGRA210_CLK_PLL_P_UPHY_OUT>;
+				clock-names = "pll", "uphy_mgmt";
+			};
+		};
 	};
 
 	usb@700d0000 {

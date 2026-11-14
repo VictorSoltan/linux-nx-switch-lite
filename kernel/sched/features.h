@@ -92,7 +92,14 @@ SCHED_FEAT(TTWU_QUEUE, true)
 /*
  * When doing wakeups, attempt to limit superfluous scans of the LLC domain.
  */
-SCHED_FEAT(SIS_UTIL, true)
+SCHED_FEAT(SIS_UTIL, false)
+
+/*
+ * Local (Switch): a waking task heavier than nice 0 that finds no idle CPU goes to the
+ * CPU whose only running fair task is the lightest instead of queueing behind an
+ * equally heavy task (see select_lighter_cpu()).
+ */
+SCHED_FEAT(SIS_LIGHTER, true)
 
 /*
  * Issue a WARN when we do multiple update_rq_clock() calls

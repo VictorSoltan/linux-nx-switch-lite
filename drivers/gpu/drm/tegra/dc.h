@@ -77,6 +77,7 @@ struct tegra_dc_soc_info {
 	bool has_win_c_without_vert_filter;
 	bool plane_tiled_memory_bandwidth_x2;
 	bool has_pll_d2_out0;
+	bool supports_scan_column;
 };
 
 struct tegra_dc {
@@ -155,6 +156,7 @@ struct tegra_dc_window {
 	unsigned int zpos;
 	bool reflect_x;
 	bool reflect_y;
+	bool transpose;
 
 	struct tegra_bo_tiling tiling;
 	u32 format;
@@ -588,6 +590,7 @@ int tegra_dc_rgb_exit(struct tegra_dc *dc);
 #define DC_WIN_WIN_OPTIONS			0x700
 #define H_DIRECTION  (1 <<  0)
 #define V_DIRECTION  (1 <<  2)
+#define SCAN_COLUMN  (1 <<  4)
 #define COLOR_EXPAND (1 <<  6)
 #define H_FILTER     (1 <<  8)
 #define V_FILTER     (1 << 10)

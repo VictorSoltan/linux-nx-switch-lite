@@ -92,6 +92,7 @@ struct nvkm_clk {
 	struct work_struct work;
 	wait_queue_head_t wait;
 	atomic_t waiting;
+	int reclock_error;
 
 	int pwrsrc;
 	int pstate; /* current */
@@ -118,6 +119,7 @@ struct nvkm_clk {
 };
 
 int nvkm_clk_read(struct nvkm_clk *, enum nv_clk_src);
+int nvkm_clk_update_volt(struct nvkm_clk *);
 int nvkm_clk_ustate(struct nvkm_clk *, int req, int pwr);
 int nvkm_clk_astate(struct nvkm_clk *, int req, int rel, bool wait);
 int nvkm_clk_dstate(struct nvkm_clk *, int req, int rel);

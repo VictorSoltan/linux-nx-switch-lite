@@ -14,6 +14,8 @@ struct nvkm_volt {
 		u8 vid;
 	} vid[256];
 
+	/* Immutable reference for bandwidth/NA safe-frequency limits. */
+	const u32 *vid_ref;
 	u32 max_uv;
 	u32 min_uv;
 
@@ -33,6 +35,9 @@ struct nvkm_volt {
 int nvkm_volt_map(struct nvkm_volt *volt, u8 id, u8 temperature);
 int nvkm_volt_map_min(struct nvkm_volt *volt, u8 id);
 int nvkm_volt_get(struct nvkm_volt *);
+int nvkm_volt_prepare(struct nvkm_volt *);
+void nvkm_volt_complete(struct nvkm_volt *, int error);
+int nvkm_volt_active(struct nvkm_volt *, bool);
 int nvkm_volt_set_id(struct nvkm_volt *, u8 id, u8 min_id, u8 temp,
 		     int condition);
 

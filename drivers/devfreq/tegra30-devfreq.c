@@ -632,6 +632,7 @@ static void tegra_actmon_stop(struct tegra_devfreq *tegra)
 static int tegra_devfreq_target(struct device *dev, unsigned long *freq,
 				u32 flags)
 {
+	struct tegra_devfreq *tegra = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
 	int ret;
 
@@ -644,7 +645,19 @@ static int tegra_devfreq_target(struct device *dev, unsigned long *freq,
 	ret = dev_pm_opp_set_opp(dev, opp);
 	dev_pm_opp_put(opp);
 
+	/* Other ICC consumers may hold EMC above our requested OPP. */
+	if (!ret)
+		*freq = clk_get_rate(tegra->emc_clock);
+
 	return ret;
+}
+
+static int tegra_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
+{
+	struct tegra_devfreq *tegra = dev_get_drvdata(dev);
+
+	*freq = clk_get_rate(tegra->emc_clock);
+	return 0;
 }
 
 static int tegra_devfreq_get_dev_status(struct device *dev,
@@ -682,6 +695,7 @@ static struct devfreq_dev_profile tegra_devfreq_profile = {
 	.polling_ms	= ACTMON_SAMPLING_PERIOD,
 	.target		= tegra_devfreq_target,
 	.get_dev_status	= tegra_devfreq_get_dev_status,
+	.get_cur_freq	= tegra_devfreq_get_cur_freq,
 	.is_cooling_device = true,
 };
 
@@ -823,6 +837,29 @@ static int tegra_devfreq_config_clks_nop(struct device *dev,
 {
 	/* We want to skip clk configuration via dev_pm_opp_set_opp() */
 	return 0;
+}
+
+static int tegra_devfreq_suspend(struct device *dev)
+{
+	struct tegra_devfreq *tegra = dev_get_drvdata(dev);
+
+	/* Stop ACTMON IRQs before EMC/BPMP enter their late sleep phase. */
+	return devfreq_suspend_device(tegra->devfreq);
+}
+
+static int tegra_devfreq_resume(struct device *dev)
+{
+	struct tegra_devfreq *tegra = dev_get_drvdata(dev);
+
+	return devfreq_resume_device(tegra->devfreq);
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(tegra_devfreq_pm_ops,
+			      tegra_devfreq_suspend, tegra_devfreq_resume);
+
+static void tegra_devfreq_shutdown(struct platform_device *pdev)
+{
+	tegra_devfreq_suspend(&pdev->dev);
 }
 
 static int tegra_devfreq_probe(struct platform_device *pdev)
@@ -973,9 +1010,11 @@ MODULE_DEVICE_TABLE(of, tegra_devfreq_of_match);
 
 static struct platform_driver tegra_devfreq_driver = {
 	.probe	= tegra_devfreq_probe,
+	.shutdown = tegra_devfreq_shutdown,
 	.driver = {
 		.name = "tegra-devfreq",
 		.of_match_table = tegra_devfreq_of_match,
+		.pm = pm_sleep_ptr(&tegra_devfreq_pm_ops),
 	},
 };
 module_platform_driver(tegra_devfreq_driver);

@@ -24,6 +24,7 @@
 #include "ummu.h"
 
 #include <core/client.h>
+#include <subdev/ltc.h>
 #include <core/memory.h>
 
 #include <nvif/if000c.h>
@@ -396,7 +397,8 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		.size = args->size,
 		.used = true,
 		.mapref = false,
-		.no_comp = true,
+		.no_comp = !(vmm->mmu->subdev.device->ltc &&
+			     vmm->mmu->subdev.device->ltc->num_tags),
 	};
 	struct nvkm_memory *memory;
 	void *argv = (void *)(uintptr_t)args->argv;
@@ -421,6 +423,10 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 	}
 
 	ret = nvkm_memory_map(memory, args->offset, vmm, &vma, argv, argc);
+
+	/* The memory keeps one comptag reference, dropped in its dtor. */
+	if (vma.tags && refcount_read(&vma.tags->refcount) > 1)
+		nvkm_memory_tags_put(memory, vmm->mmu->subdev.device, &vma.tags);
 
 	nvkm_memory_unref(&vma.memory);
 	nvkm_memory_unref(&memory);

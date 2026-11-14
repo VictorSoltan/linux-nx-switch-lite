@@ -41,9 +41,11 @@
 #define TEGRA_MAX_NUM_ICTLRS	6
 
 static unsigned int num_ictlrs;
+static bool ictlr_has_bpmpl;
 
 struct tegra_ictlr_soc {
 	unsigned int num_ictlrs;
+	bool has_bpmpl;
 };
 
 static const struct tegra_ictlr_soc tegra20_ictlr_soc = {
@@ -56,6 +58,7 @@ static const struct tegra_ictlr_soc tegra30_ictlr_soc = {
 
 static const struct tegra_ictlr_soc tegra210_ictlr_soc = {
 	.num_ictlrs = 6,
+	.has_bpmpl = true,
 };
 
 static const struct of_device_id ictlr_matches[] = {
@@ -147,8 +150,9 @@ static int tegra_ictlr_suspend(void *data)
 		lic->cop_ier[i] = readl_relaxed(ictlr + ICTLR_COP_IER);
 		lic->cop_iep[i] = readl_relaxed(ictlr + ICTLR_COP_IEP_CLASS);
 
-		/* Disable COP interrupts */
-		writel_relaxed(GENMASK(31, 0), ictlr + ICTLR_COP_IER_CLR);
+		/* The SC7 entry firmware runs on the COP and needs its IRQs */
+		if (!ictlr_has_bpmpl)
+			writel_relaxed(GENMASK(31, 0), ictlr + ICTLR_COP_IER_CLR);
 
 		/* Disable CPU interrupts */
 		writel_relaxed(GENMASK(31, 0), ictlr + ICTLR_CPU_IER_CLR);
@@ -301,6 +305,7 @@ static int __init tegra_ictlr_init(struct device_node *node,
 		return -ENODEV;
 
 	soc = match->data;
+	ictlr_has_bpmpl = soc->has_bpmpl;
 
 	lic = kzalloc_obj(*lic);
 	if (!lic)

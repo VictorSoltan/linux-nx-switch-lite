@@ -285,6 +285,9 @@ struct gf100_gr_chan {
 	struct nvkm_vma *attrib_cb;
 	struct nvkm_vma *unknown;
 
+	struct nvkm_memory *zcull;
+	struct nvkm_vma *zcull_vma;
+
 	struct nvkm_memory *mmio;
 	struct nvkm_vma *mmio_vma;
 	int mmio_nr;

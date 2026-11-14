@@ -698,8 +698,13 @@ static void tegra_xudc_restore_port_speed(struct tegra_xudc *xudc)
 
 static void tegra_xudc_device_mode_on(struct tegra_xudc *xudc)
 {
+	int port = tegra_xusb_padctl_get_port_number(xudc->curr_utmi_phy);
 	int err;
 
+	if (!tegra_xusb_usb2_port_wait_role_none(xudc->padctl, port))
+		return;
+
+	dev_info(xudc->dev, "NXROLE: device_mode_on port=%d\n", port);
 	pm_runtime_get_sync(xudc->dev);
 
 	tegra_phy_xusb_utmi_pad_power_on(xudc->curr_utmi_phy);
@@ -815,6 +820,8 @@ static void tegra_xudc_update_data_role(struct tegra_xudc *xudc,
 	xudc->device_mode = usbphy->last_event == USB_EVENT_VBUS;
 
 	phy_index = tegra_xudc_get_phy_index(xudc, usbphy);
+	dev_info(xudc->dev, "NXROLE: event=%d device_mode=%d phy_index=%d\n",
+		 usbphy->last_event, xudc->device_mode, phy_index);
 	dev_dbg(xudc->dev, "%s(): current phy index is %d\n", __func__,
 		phy_index);
 
@@ -833,7 +840,8 @@ static int tegra_xudc_vbus_notify(struct notifier_block *nb,
 					       vbus_nb);
 	struct usb_phy *usbphy = (struct usb_phy *)data;
 
-	dev_dbg(xudc->dev, "%s(): event is %d\n", __func__, usbphy->last_event);
+	dev_info(xudc->dev, "NXROLE: vbus notifier event=%d\n",
+		 usbphy->last_event);
 
 	tegra_xudc_update_data_role(xudc, usbphy);
 

@@ -3,6 +3,9 @@
 #define __NVKM_DEVICE_PRIV_H__
 #include <core/device.h>
 
+void gm20b_device_clkgate(struct nvkm_device *, bool);
+void gm20b_device_clkgate_gr(struct nvkm_device *, bool running);
+
 #include <subdev/acr.h>
 #include <subdev/bar.h>
 #include <subdev/bios.h>

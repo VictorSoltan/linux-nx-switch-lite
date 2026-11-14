@@ -415,8 +415,9 @@ tegra_plane_use_horizontal_filtering(struct tegra_plane *plane,
 				     const struct tegra_dc_window *window)
 {
 	struct tegra_dc *dc = plane->dc;
+	unsigned int in = window->transpose ? window->src.h : window->src.w;
 
-	if (window->src.w == window->dst.w)
+	if (in == window->dst.w)
 		return false;
 
 	if (plane->index == 0 && dc->soc->has_win_a_without_filters)
@@ -430,8 +431,9 @@ tegra_plane_use_vertical_filtering(struct tegra_plane *plane,
 				   const struct tegra_dc_window *window)
 {
 	struct tegra_dc *dc = plane->dc;
+	unsigned int in = window->transpose ? window->src.w : window->src.h;
 
-	if (window->src.h == window->dst.h)
+	if (in == window->dst.h)
 		return false;
 
 	if (plane->index == 0 && dc->soc->has_win_a_without_filters)
@@ -476,8 +478,23 @@ static void tegra_dc_setup_window(struct tegra_plane *plane,
 	h_size = window->src.w * bpp;
 	v_size = window->src.h;
 
-	if (window->reflect_x)
-		h_offset += (window->src.w - 1) * bpp;
+	/*
+	 * SCAN_COLUMN (90/270 rotation): every display line is fetched from
+	 * a framebuffer column, so the prescaled size and the DDA run along
+	 * swapped axes, while the start offsets stay in framebuffer
+	 * coordinates. Same programming as the vendor Tegra210 driver.
+	 */
+	if (window->transpose) {
+		h_size = window->src.h * bpp;
+		v_size = window->src.w;
+	}
+
+	if (window->reflect_x) {
+		if (window->transpose)
+			h_offset += window->src.w * bpp - 1;
+		else
+			h_offset += (window->src.w - 1) * bpp;
+	}
 
 	if (window->reflect_y)
 		v_offset += window->src.h - 1;
@@ -492,14 +509,24 @@ static void tegra_dc_setup_window(struct tegra_plane *plane,
 	if (yuv && planes > 1)
 		bpp = 2;
 
-	h_dda = compute_dda_inc(window->src.w, window->dst.w, false, bpp);
-	v_dda = compute_dda_inc(window->src.h, window->dst.h, true, bpp);
+	if (window->transpose) {
+		h_dda = compute_dda_inc(window->src.h, window->dst.w, false, bpp);
+		v_dda = compute_dda_inc(window->src.w, window->dst.h, true, bpp);
+	} else {
+		h_dda = compute_dda_inc(window->src.w, window->dst.w, false, bpp);
+		v_dda = compute_dda_inc(window->src.h, window->dst.h, true, bpp);
+	}
 
 	value = V_DDA_INC(v_dda) | H_DDA_INC(h_dda);
 	tegra_plane_writel(plane, value, DC_WIN_DDA_INC);
 
-	h_dda = compute_initial_dda(window->src.x);
-	v_dda = compute_initial_dda(window->src.y);
+	if (window->transpose) {
+		h_dda = compute_initial_dda(window->src.y);
+		v_dda = compute_initial_dda(window->src.x);
+	} else {
+		h_dda = compute_initial_dda(window->src.x);
+		v_dda = compute_initial_dda(window->src.y);
+	}
 
 	tegra_plane_writel(plane, h_dda, DC_WIN_H_INITIAL_DDA);
 	tegra_plane_writel(plane, v_dda, DC_WIN_V_INITIAL_DDA);
@@ -589,6 +616,9 @@ static void tegra_dc_setup_window(struct tegra_plane *plane,
 
 	if (window->reflect_y)
 		value |= V_DIRECTION;
+
+	if (window->transpose)
+		value |= SCAN_COLUMN;
 
 	if (tegra_plane_use_horizontal_filtering(plane, window)) {
 		/*
@@ -703,6 +733,24 @@ static const u32 tegra124_primary_formats[] = {
 	DRM_FORMAT_BGRX8888,
 };
 
+/*
+ * Tegra210 primary scanout on Nintendo Switch is reliable with opaque
+ * framebuffer formats. Alpha-bearing 32-bit formats can produce corrupted
+ * channel ordering on the primary plane, while overlays retain the full
+ * format list. Keep the primary plane opaque so compositors naturally choose
+ * XRGB/XBGR scanout.
+ */
+static const u32 tegra210_primary_formats[] = {
+	DRM_FORMAT_RGB565,
+	DRM_FORMAT_XRGB1555,
+	DRM_FORMAT_RGBX5551,
+	DRM_FORMAT_XBGR1555,
+	DRM_FORMAT_BGRX5551,
+	DRM_FORMAT_BGR565,
+	DRM_FORMAT_XRGB8888,
+	DRM_FORMAT_XBGR8888,
+};
+
 static const u64 tegra124_modifiers[] = {
 	DRM_FORMAT_MOD_LINEAR,
 	DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(0),
@@ -711,8 +759,37 @@ static const u64 tegra124_modifiers[] = {
 	DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(3),
 	DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(4),
 	DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(5),
+	/*
+	 * The same layouts in the canonical encoding (kind 0xfe) that Mesa
+	 * uses, so that GPU-rendered block linear buffers can be scanned out
+	 * directly instead of falling back to linear.
+	 */
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 0),
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 1),
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 2),
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 3),
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 4),
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 5),
 	DRM_FORMAT_MOD_INVALID
 };
+
+/* windows A-C of the Tegra210 display controller can fetch in column order */
+static bool tegra_plane_supports_scan_column(struct tegra_plane *plane)
+{
+	return plane->dc->soc->supports_scan_column && plane->index < 3 &&
+	       plane->base.type != DRM_PLANE_TYPE_CURSOR;
+}
+
+static unsigned int tegra_plane_rotations(struct tegra_plane *plane)
+{
+	unsigned int rotations = DRM_MODE_ROTATE_0 | DRM_MODE_ROTATE_180 |
+				 DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
+
+	if (tegra_plane_supports_scan_column(plane))
+		rotations |= DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270;
+
+	return rotations;
+}
 
 static int tegra_plane_atomic_check(struct drm_plane *plane,
 				    struct drm_atomic_commit *state)
@@ -775,17 +852,35 @@ static int tegra_plane_atomic_check(struct drm_plane *plane,
 	if (tegra_fb_is_bottom_up(new_plane_state->fb))
 		rotation |= DRM_MODE_REFLECT_Y;
 
+	if (tegra_plane_supports_scan_column(tegra))
+		supported_rotation |= DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270;
+
 	rotation = drm_rotation_simplify(rotation, supported_rotation);
 
-	if (rotation & DRM_MODE_REFLECT_X)
-		plane_state->reflect_x = true;
-	else
-		plane_state->reflect_x = false;
+	/*
+	 * DRM reflects in framebuffer space first and then rotates counter-
+	 * clockwise (drm_rect_rotate()). SCAN_COLUMN transposes; H/V_DIRECTION
+	 * then reverse the framebuffer X/Y walk. ROTATE_90 is a transpose with
+	 * X reversed, ROTATE_270 a transpose with Y reversed, and a reflection
+	 * toggles the corresponding direction.
+	 */
+	plane_state->transpose = drm_rotation_90_or_270(rotation);
+	plane_state->reflect_x = !!(rotation & DRM_MODE_REFLECT_X) ^
+				 !!(rotation & DRM_MODE_ROTATE_90);
+	plane_state->reflect_y = !!(rotation & DRM_MODE_REFLECT_Y) ^
+				 !!(rotation & DRM_MODE_ROTATE_270);
 
-	if (rotation & DRM_MODE_REFLECT_Y)
-		plane_state->reflect_y = true;
-	else
-		plane_state->reflect_y = false;
+	/*
+	 * Column fetch is only efficient from block linear surfaces (the
+	 * display line buffer holds 16 bytes worth of framebuffer lines);
+	 * pitch linear would cost one memory request per pixel. Reject it
+	 * so that compositors fall back to rotating in their renderer.
+	 */
+	if (plane_state->transpose &&
+	    (tiling->mode != TEGRA_BO_TILING_MODE_BLOCK ||
+	     new_plane_state->fb->format->num_planes > 1 ||
+	     new_plane_state->fb->format->is_yuv))
+		return -EINVAL;
 
 	/*
 	 * Tegra doesn't support different strides for U and V planes so we
@@ -853,6 +948,7 @@ static void tegra_plane_atomic_update(struct drm_plane *plane,
 	window.bits_per_pixel = fb->format->cpp[0] * 8;
 	window.reflect_x = tegra_plane_state->reflect_x;
 	window.reflect_y = tegra_plane_state->reflect_y;
+	window.transpose = tegra_plane_state->transpose;
 
 	/* copy from state */
 	window.zpos = new_state->normalized_zpos;
@@ -943,10 +1039,7 @@ static struct drm_plane *tegra_primary_plane_create(struct drm_device *drm,
 
 	err = drm_plane_create_rotation_property(&plane->base,
 						 DRM_MODE_ROTATE_0,
-						 DRM_MODE_ROTATE_0 |
-						 DRM_MODE_ROTATE_180 |
-						 DRM_MODE_REFLECT_X |
-						 DRM_MODE_REFLECT_Y);
+						 tegra_plane_rotations(plane));
 	if (err < 0)
 		dev_err(dc->dev, "failed to create rotation property: %d\n",
 			err);
@@ -1359,6 +1452,7 @@ static struct drm_plane *tegra_dc_overlay_plane_create(struct drm_device *drm,
 	struct tegra_plane *plane;
 	unsigned int num_formats;
 	enum drm_plane_type type;
+	const u64 *modifiers;
 	const u32 *formats;
 	int err;
 
@@ -1384,9 +1478,20 @@ static struct drm_plane *tegra_dc_overlay_plane_create(struct drm_device *drm,
 	else
 		type = DRM_PLANE_TYPE_CURSOR;
 
+	/*
+	 * Tegra210 windows B and C scan out block linear surfaces like window A
+	 * (and rotate them with SCAN_COLUMN). Advertising it lets compositors
+	 * allocate rotatable overlay buffers instead of falling back to
+	 * composition.
+	 */
+	if (!cursor && dc->soc->supports_scan_column)
+		modifiers = dc->soc->modifiers;
+	else
+		modifiers = linear_modifiers;
+
 	err = drm_universal_plane_init(drm, &plane->base, possible_crtcs,
 				       &tegra_plane_funcs, formats,
-				       num_formats, linear_modifiers,
+				       num_formats, modifiers,
 				       type, NULL);
 	if (err < 0) {
 		kfree(plane);
@@ -1398,10 +1503,7 @@ static struct drm_plane *tegra_dc_overlay_plane_create(struct drm_device *drm,
 
 	err = drm_plane_create_rotation_property(&plane->base,
 						 DRM_MODE_ROTATE_0,
-						 DRM_MODE_ROTATE_0 |
-						 DRM_MODE_ROTATE_180 |
-						 DRM_MODE_REFLECT_X |
-						 DRM_MODE_REFLECT_Y);
+						 tegra_plane_rotations(plane));
 	if (err < 0)
 		dev_err(dc->dev, "failed to create rotation property: %d\n",
 			err);
@@ -3042,8 +3144,8 @@ static const struct tegra_dc_soc_info tegra210_dc_soc_info = {
 	.has_powergate = true,
 	.coupled_pm = false,
 	.has_nvdisplay = false,
-	.num_primary_formats = ARRAY_SIZE(tegra114_primary_formats),
-	.primary_formats = tegra114_primary_formats,
+	.num_primary_formats = ARRAY_SIZE(tegra210_primary_formats),
+	.primary_formats = tegra210_primary_formats,
 	.num_overlay_formats = ARRAY_SIZE(tegra114_overlay_formats),
 	.overlay_formats = tegra114_overlay_formats,
 	.modifiers = tegra124_modifiers,
@@ -3052,6 +3154,7 @@ static const struct tegra_dc_soc_info tegra210_dc_soc_info = {
 	.has_win_c_without_vert_filter = false,
 	.plane_tiled_memory_bandwidth_x2 = false,
 	.has_pll_d2_out0 = true,
+	.supports_scan_column = true,
 };
 
 static const struct tegra_windowgroup_soc tegra186_dc_wgrps[] = {

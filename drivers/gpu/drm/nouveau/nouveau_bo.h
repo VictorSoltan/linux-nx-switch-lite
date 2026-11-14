@@ -17,6 +17,10 @@ struct nouveau_bo {
 	u32 valid_domains;
 	struct ttm_place placements[3];
 	bool force_coherent;
+	/* CPU mapping seen: its writes are invisible here, clean every time */
+	bool cpu_mapped;
+	/* Cleaned since the pages last changed, only the GPU can touch them */
+	bool device_clean;
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;
@@ -83,9 +87,12 @@ u32  nouveau_bo_rd32(struct nouveau_bo *, unsigned index);
 void nouveau_bo_wr32(struct nouveau_bo *, unsigned index, u32 val);
 vm_fault_t nouveau_ttm_fault_reserve_notify(struct ttm_buffer_object *bo);
 void nouveau_bo_fence(struct nouveau_bo *, struct nouveau_fence *, bool exclusive);
+int  nouveau_bo_validate_bind(struct nouveau_bo *, bool interruptible,
+			      bool no_wait_gpu);
 int  nouveau_bo_validate(struct nouveau_bo *, bool interruptible,
 			 bool no_wait_gpu);
 void nouveau_bo_sync_for_device(struct nouveau_bo *nvbo);
+void nouveau_bo_cpu_mapped(struct nouveau_bo *nvbo);
 void nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo);
 void nouveau_bo_add_io_reserve_lru(struct ttm_buffer_object *bo);
 void nouveau_bo_del_io_reserve_lru(struct ttm_buffer_object *bo);

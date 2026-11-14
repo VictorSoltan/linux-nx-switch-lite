@@ -2152,6 +2152,7 @@ struct rt5640_priv {
 	int pll_out;
 
 	bool hp_mute;
+	bool speaker_eq;
 	bool asrc_en;
 	bool irq_requested;
 	bool jd_gpio_irq_requested;

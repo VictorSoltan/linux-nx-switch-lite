@@ -30,6 +30,9 @@
 #include "gk20a_devfreq.h"
 #include "gk20a.h"
 
+#include <linux/dev_printk.h>
+#include <linux/regulator/consumer.h>
+
 #define GPCPLL_CFG_SYNC_MODE	BIT(2)
 
 #define BYPASSCTRL_SYS	(SYS_GPCPLL_CFG_BASE + 0x340)
@@ -41,7 +44,7 @@
 #define GPCPLL_CFG2_SDM_DIN_MASK	\
 	(MASK(GPCPLL_CFG2_SDM_DIN_WIDTH) << GPCPLL_CFG2_SDM_DIN_SHIFT)
 #define GPCPLL_CFG2_SDM_DIN_NEW_SHIFT	8
-#define GPCPLL_CFG2_SDM_DIN_NEW_WIDTH	15
+#define GPCPLL_CFG2_SDM_DIN_NEW_WIDTH	8
 #define GPCPLL_CFG2_SDM_DIN_NEW_MASK	\
 	(MASK(GPCPLL_CFG2_SDM_DIN_NEW_WIDTH) << GPCPLL_CFG2_SDM_DIN_NEW_SHIFT)
 #define GPCPLL_CFG2_SETUP2_SHIFT	16
@@ -94,12 +97,21 @@ struct gm20b_clk_dvfs_params {
 	s32 coeff_slope;
 	s32 coeff_offs;
 	u32 vco_ctrl;
+	u32 dfs_ctrl;
 };
 
 static const struct gm20b_clk_dvfs_params gm20b_dvfs_params = {
 	.coeff_slope = -165230,
 	.coeff_offs = 214007,
 	.vco_ctrl = 0x7 << 3,
+};
+
+/* NVIDIA's GPCPLL C1 parameters for Tegra210B01. */
+static const struct gm20b_clk_dvfs_params gm20b_b01_dvfs_params = {
+	.coeff_slope = -172550,
+	.coeff_offs = 195374,
+	.vco_ctrl = (1 << 3) | 7,
+	.dfs_ctrl = 3 << 10,
 };
 
 /*
@@ -269,7 +281,7 @@ gm20b_pllg_slide(struct gm20b_clk *clk, u32 n)
 	struct nvkm_subdev *subdev = &clk->base.base.subdev;
 	struct nvkm_device *device = subdev->device;
 	struct gm20b_pll pll;
-	u32 n_int, sdm_din;
+	u32 n_int, sdm_din, old_n, status = 0;
 	int ret = 0;
 
 	/* calculate the new n_int/sdm_din for this n/uv */
@@ -277,6 +289,7 @@ gm20b_pllg_slide(struct gm20b_clk *clk, u32 n)
 
 	/* get old coefficients */
 	gm20b_pllg_read_mnp(clk, &pll);
+	old_n = pll.base.n;
 	/* do nothing if NDIV is the same */
 	if (n_int == pll.base.n && sdm_din == pll.sdm_din)
 		return 0;
@@ -300,15 +313,30 @@ gm20b_pllg_slide(struct gm20b_clk *clk, u32 n)
 		  BIT(GPCPLL_NDIV_SLOWDOWN_EN_DYNRAMP_SHIFT),
 		  BIT(GPCPLL_NDIV_SLOWDOWN_EN_DYNRAMP_SHIFT));
 
-	/* wait for ramping to complete */
-	if (nvkm_wait_usec(device, 500, GPC_BCAST_NDIV_SLOWDOWN_DEBUG,
-		GPC_BCAST_NDIV_SLOWDOWN_DEBUG_PLL_DYNRAMP_DONE_SYNCED_MASK,
-		GPC_BCAST_NDIV_SLOWDOWN_DEBUG_PLL_DYNRAMP_DONE_SYNCED_MASK) < 0)
-		ret = -ETIMEDOUT;
+	/* The GPU may finish between the last poll and the timeout test, e.g.
+	 * while this worker is preempted. Check once more before declaring a
+	 * failure; suppress the poll's WARN until that final status is known.
+	 */
+	if (nvkm_usec(device, 500, NVKM_DELAY
+		if (nvkm_rd32(device, GPC_BCAST_NDIV_SLOWDOWN_DEBUG) &
+		    GPC_BCAST_NDIV_SLOWDOWN_DEBUG_PLL_DYNRAMP_DONE_SYNCED_MASK)
+			break;
+	) < 0) {
+		status = nvkm_rd32(device, GPC_BCAST_NDIV_SLOWDOWN_DEBUG);
+		if (!(status & GPC_BCAST_NDIV_SLOWDOWN_DEBUG_PLL_DYNRAMP_DONE_SYNCED_MASK))
+			ret = -ETIMEDOUT;
+	}
 
-	/* in DVFS mode complete SDM update */
-	nvkm_mask(device, GPCPLL_CFG2, GPCPLL_CFG2_SDM_DIN_MASK,
-		  sdm_din << GPCPLL_CFG2_SDM_DIN_SHIFT);
+	/* A failed ramp must not commit SDM_NEW (as in NVIDIA's DVFS path). */
+	if (!ret)
+		nvkm_mask(device, GPCPLL_CFG2, GPCPLL_CFG2_SDM_DIN_MASK,
+			  sdm_din << GPCPLL_CFG2_SDM_DIN_SHIFT);
+	else
+		dev_warn_ratelimited(device->dev,
+			  "clk: PLL ramp timeout M=%u PL=%u N=%u SDM=%#x -> N=%u SDM=%#x uv=%u status=%#x; direct retry\n",
+			  pll.base.m, pll.base.pl,
+			  old_n, pll.sdm_din, n_int, sdm_din, clk->uv,
+			  status);
 
 	/* exit slowdown mode */
 	nvkm_mask(device, GPCPLL_NDIV_SLOWDOWN,
@@ -500,7 +528,7 @@ gm20b_dvfs_calc_safe_pll(struct gm20b_clk *clk, struct gk20a_pll *pll)
 	rate *= 2;
 
 	nmin = DIV_ROUND_UP(pll->m * clk->base.params->min_vco, parent_rate);
-	nsafe = pll->m * rate / (clk->base.parent_rate);
+	nsafe = pll->m * rate / parent_rate;
 
 	if (nsafe < nmin) {
 		pll->pl = DIV_ROUND_UP(nmin * parent_rate, pll->m * rate);
@@ -613,6 +641,8 @@ gm20b_clk_prog(struct nvkm_clk *base)
 		gm20b_dvfs_calc_safe_pll(clk, &pll_safe);
 		ret = gm20b_pllg_program_mnp_slide(clk, &pll_safe);
 		if (ret)
+			ret = gm20b_pllg_program_mnp(clk, &pll_safe);
+		if (ret)
 			return ret;
 	}
 
@@ -632,7 +662,10 @@ prog:
 	clk->dvfs = clk->new_dvfs;
 	clk->base.pll = clk->new_pll;
 
-	return gm20b_pllg_program_mnp_slide(clk, &clk->base.pll);
+	ret = gm20b_pllg_program_mnp_slide(clk, &clk->base.pll);
+	if (ret)
+		ret = gm20b_pllg_program_mnp(clk, &clk->base.pll);
+	return ret;
 }
 
 static struct nvkm_pstate
@@ -842,7 +875,7 @@ gm20b_clk_fini(struct nvkm_clk *base)
 	gm20b_pllg_disable(clk);
 
 	/* set IDDQ */
-	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, 1);
+	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, GPCPLL_CFG_IDDQ);
 }
 
 static int
@@ -863,6 +896,10 @@ gm20b_clk_init_dvfs(struct gm20b_clk *clk)
 	if (clk->dvfs_params->vco_ctrl)
 		nvkm_mask(device, GPCPLL_CFG3, GPCPLL_CFG3_VCO_CTRL_MASK,
 		      clk->dvfs_params->vco_ctrl << GPCPLL_CFG3_VCO_CTRL_SHIFT);
+	if (clk->dvfs_params->dfs_ctrl)
+		nvkm_mask(device, GPCPLL_DVFS1,
+			  MASK(GPCPLL_DVFS1_DFS_CTRL_WIDTH) << GPCPLL_DVFS1_DFS_CTRL_SHIFT,
+			  clk->dvfs_params->dfs_ctrl << GPCPLL_DVFS1_DFS_CTRL_SHIFT);
 
 	if (fused) {
 		/* Start internal calibration, but ignore results */
@@ -906,7 +943,7 @@ calibrated:
 	gm20b_dvfs_program_coeff(clk, 0);
 	gm20b_dvfs_program_ext_cal(clk, clk->dvfs.dfs_ext_cal);
 	gm20b_dvfs_program_coeff(clk, clk->dvfs.dfs_coeff);
-	gm20b_dvfs_program_dfs_detection(clk, &clk->new_dvfs);
+	gm20b_dvfs_program_dfs_detection(clk, &clk->dvfs);
 
 	return 0;
 }
@@ -920,8 +957,13 @@ gm20b_clk_init(struct nvkm_clk *base)
 	struct gk20a_clk *clk = gk20a_clk(base);
 	struct nvkm_subdev *subdev = &clk->base.subdev;
 	struct nvkm_device *device = subdev->device;
+	bool na = base->func->prog == gm20b_clk_prog;
 	int ret;
 	u32 data;
+
+	/* Change legacy/NA mode only while the PLL is under bypass. */
+	if (na)
+		gm20b_pllg_disable(gm20b_clk(base));
 
 	/* get out from IDDQ */
 	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, 0);
@@ -954,13 +996,12 @@ gm20b_clk_init(struct nvkm_clk *base)
 	/* Disable idle slow down  */
 	nvkm_mask(device, 0x20160, 0x003f0000, 0x0);
 
-	/* speedo >= 1? */
-	if (clk->base.func == &gm20b_clk) {
+	if (na) {
 		struct gm20b_clk *_clk = gm20b_clk(base);
-		struct nvkm_volt *volt = device->volt;
-
 		/* Get current voltage */
-		_clk->uv = nvkm_volt_get(volt);
+		_clk->uv = regulator_get_voltage(device->func->tegra(device)->vdd);
+		if ((s32)_clk->uv <= 0)
+			return (s32)_clk->uv ?: -EINVAL;
 
 		/* Initialize DVFS */
 		ret = gm20b_clk_init_dvfs(_clk);
@@ -969,11 +1010,19 @@ gm20b_clk_init(struct nvkm_clk *base)
 	}
 
 	/* Start with lowest frequency */
-	base->func->calc(base, &base->func->pstates[0].base);
+	ret = base->func->calc(base, &base->func->pstates[0].base);
+	if (ret)
+		return ret;
 	ret = base->func->prog(base);
 	if (ret) {
 		nvkm_error(subdev, "cannot initialize clock\n");
 		return ret;
+	}
+
+	if (na) {
+		ret = nvkm_volt_set_id(device->volt, 0, 0, 0, -1);
+		if (ret)
+			return ret;
 	}
 
 	ret = gk20a_devfreq_init(base, &clk->devfreq);
@@ -1021,10 +1070,10 @@ gm20b_clk = {
 static const struct nvkm_clk_func
 gm20b_b01_clk = {
 	.init = gm20b_clk_init,
-	.fini = gk20a_clk_fini,
+	.fini = gm20b_clk_fini,
 	.read = gk20a_clk_read,
-	.calc = gk20a_clk_calc,
-	.prog = gk20a_clk_prog,
+	.calc = gm20b_clk_calc,
+	.prog = gm20b_clk_prog,
 	.tidy = gk20a_clk_tidy,
 	.pstates = gm20b_b01_pstates,
 	.nr_pstates = ARRAY_SIZE(gm20b_b01_pstates),
@@ -1036,16 +1085,34 @@ gm20b_b01_clk = {
 };
 
 static const struct nvkm_clk_func
+gm20b_b01_clk_limited = {
+	.init = gm20b_clk_init,
+	.fini = gm20b_clk_fini,
+	.read = gk20a_clk_read,
+	.calc = gm20b_clk_calc,
+	.prog = gm20b_clk_prog,
+	.tidy = gk20a_clk_tidy,
+	.pstates = gm20b_b01_pstates,
+	/* Preserve the existing ID0 OPP range, including the 844.8MHz game cap. */
+	.nr_pstates = 12,
+	.domains = {
+		{ nv_clk_src_crystal, 0xff },
+		{ nv_clk_src_gpc, 0xff, 0, "core", GK20A_CLK_GPC_MDIV },
+		{ nv_clk_src_max },
+	},
+};
+
+static const struct nvkm_clk_func
 gm20b_b01_hiopt_clk_speedo = {
 	.init = gm20b_clk_init,
-	.fini = gk20a_clk_fini,
+	.fini = gm20b_clk_fini,
 	.read = gk20a_clk_read,
-	.calc = gk20a_clk_calc,
-	.prog = gk20a_clk_prog,
+	.calc = gm20b_clk_calc,
+	.prog = gm20b_clk_prog,
 	.tidy = gk20a_clk_tidy,
-	.pstates = gm20b_pstates,
+	.pstates = gm20b_b01_pstates,
 	/* HIOPT speedo only supports 16 voltages */
-	.nr_pstates = ARRAY_SIZE(gm20b_pstates) - 1,
+	.nr_pstates = ARRAY_SIZE(gm20b_b01_pstates) - 1,
 	.domains = {
 		{ nv_clk_src_crystal, 0xff },
 		{ nv_clk_src_gpc, 0xff, 0, "core", GK20A_CLK_GPC_MDIV },
@@ -1066,24 +1133,6 @@ gm20b_clk_new_speedo0(struct nvkm_device *device, enum nvkm_subdev_type type, in
 	*pclk = &clk->base;
 
 	ret = gk20a_clk_ctor(device, type, inst, &gm20b_clk_speedo0, &gm20b_pllg_params, clk);
-	clk->pl_to_div = pl_to_div;
-	clk->div_to_pl = div_to_pl;
-	return ret;
-}
-
-static int
-gm20b_b01_clk_new_hiopt(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
-		      struct nvkm_clk **pclk)
-{
-	struct gk20a_clk *clk;
-	int ret;
-
-	clk = kzalloc(sizeof(*clk), GFP_KERNEL);
-	if (!clk)
-		return -ENOMEM;
-	*pclk = &clk->base;
-
-	ret = gk20a_clk_ctor(device, type, inst, &gm20b_b01_hiopt_clk_speedo, &gm20b_pllg_params, clk);
 	clk->pl_to_div = pl_to_div;
 	clk->div_to_pl = div_to_pl;
 	return ret;
@@ -1143,7 +1192,7 @@ gm20b_clk_init_safe_fmax(struct gm20b_clk *clk)
 	struct nvkm_volt *volt = subdev->device->volt;
 	struct nvkm_pstate *pstates = clk->base.base.func->pstates;
 	int nr_pstates = clk->base.base.func->nr_pstates;
-	int vmin, id = 0;
+	int vmin;
 	u32 fmax = 0;
 	int i;
 
@@ -1152,13 +1201,13 @@ gm20b_clk_init_safe_fmax(struct gm20b_clk *clk)
 	for (i = 1; i < volt->vid_nr; i++) {
 		if (volt->vid[i].uv <= vmin) {
 			vmin = volt->vid[i].uv;
-			id = volt->vid[i].vid;
 		}
 	}
 
 	/* find max frequency at this voltage */
 	for (i = 0; i < nr_pstates; i++)
-		if (pstates[i].base.voltage == id)
+		if (pstates[i].base.voltage < volt->vid_nr &&
+		    volt->vid[pstates[i].base.voltage].uv == vmin)
 			fmax = max(fmax,
 				   pstates[i].base.domain[nv_clk_src_gpc]);
 
@@ -1242,13 +1291,13 @@ gm20b_b01_clk_new(struct nvkm_device *device, enum nvkm_subdev_type type, int in
 	struct gm20b_clk *clk;
 	struct nvkm_subdev *subdev;
 	struct gk20a_clk_pllg_params *clk_params;
+	const struct nvkm_clk_func *func;
 	int ret;
 
-	/* Speedo 0 GPUs cannot use noise-aware PLL */
-	if (tdev->gpu_speedo_id == 0)
-		return gm20b_b01_clk_new_hiopt(device, type, inst, pclk);
-
-	/* Speedo >= 1, use NAPLL */
+	/* The ID0 board override limits OPPs; it does not turn C1 into T210. */
+	func = tdev->gpu_speedo_id == 0 ? &gm20b_b01_clk_limited :
+	       tdev->gpu_speedo_id == 3 ? &gm20b_b01_hiopt_clk_speedo :
+					&gm20b_b01_clk;
 	clk = kzalloc(sizeof(*clk) + sizeof(*clk_params), GFP_KERNEL);
 	if (!clk)
 		return -ENOMEM;
@@ -1258,26 +1307,21 @@ gm20b_b01_clk_new(struct nvkm_device *device, enum nvkm_subdev_type type, int in
 	/* duplicate the clock parameters since we will patch them below */
 	clk_params = (void *) (clk + 1);
 	*clk_params = gm20b_pllg_params;
-	ret = gk20a_clk_ctor(device, type, inst, &gm20b_b01_clk, clk_params, &clk->base);
+	ret = gk20a_clk_ctor(device, type, inst, func, clk_params, &clk->base);
 	if (ret)
 		return ret;
 
-	/*
-	 * NAPLL can only work with max_u, clamp the m range so
-	 * gk20a_pllg_calc_mnp always uses it
-	 */
-	clk_params->max_m = clk_params->min_m = DIV_ROUND_UP(clk_params->max_u,
-						(clk->base.parent_rate / KHZ));
-	if (clk_params->max_m == 0) {
-		nvkm_warn(subdev, "cannot use NAPLL, using legacy clock...\n");
-		kfree(clk);
-		return gm20b_b01_clk_new_hiopt(device, type, inst, pclk);
-	}
+	/* C1 NA mode requires its 38.4MHz reference and MDIV=1. */
+	if (clk->base.parent_rate != 38400000)
+		return -EINVAL;
+	clk_params->min_m = clk_params->max_m = 1;
+	clk_params->min_u = clk_params->max_u = 38400;
 
 	clk->base.pl_to_div = pl_to_div;
 	clk->base.div_to_pl = div_to_pl;
+	clk->base.pl_direct = true;
 
-	clk->dvfs_params = &gm20b_dvfs_params;
+	clk->dvfs_params = &gm20b_b01_dvfs_params;
 
 	ret = gm20b_clk_init_fused_params(clk);
 	/*

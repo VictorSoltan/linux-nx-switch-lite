@@ -1040,7 +1040,7 @@ static int bm92t_get_resources(struct bm92t_pd *bm)
 		bm->vbus_src = NULL;
 	}
 
-	bm->chg_reg = devm_regulator_get_optional(dev, "pd-bat-chg");
+	bm->chg_reg = devm_regulator_get_optional(dev, "pd_bat_chg");
 	if (IS_ERR(bm->chg_reg)) {
 		if (PTR_ERR(bm->chg_reg) != -ENODEV)
 			return dev_err_probe(dev, PTR_ERR(bm->chg_reg),
@@ -1186,6 +1186,7 @@ static void bm92t_remove(struct i2c_client *client)
 }
 
 static const struct of_device_id bm92t_of_match[] = {
+	{ .compatible = "rohm,bm92t" },
 	{ .compatible = "rohm,bm92t36" },
 	{ .compatible = "rohm,bm92t40" },
 	{ }

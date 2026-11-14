@@ -33,6 +33,24 @@
 #include <nvif/if900b.h>
 #include <nvif/if900d.h>
 
+/* Tegra has no VRAM: volatile keeps a BO out of the GPU L2 cache. The legacy
+ * uAPI client (the OpenGL driver) writes push buffers, queries, fences,
+ * vertex/constant data and staging through the CPU and reads GPU results back
+ * the same way; the L2 is not invalidated for it, so those stay volatile
+ * (cached they gave PBENTRY faults and stale fences). Block-linear BOs
+ * (kind != 0: textures, render targets, depth) are touched by the GPU only,
+ * the CPU goes through linear staging; they are mapped cached, as nouveau_uvmm
+ * does for NVK.
+ */
+static bool
+nouveau_mem_soc_gpu_only(struct nouveau_mem *mem)
+{
+	struct ttm_buffer_object *bo = mem->base.bo;
+
+	return bo && nouveau_bo(bo)->valid_domains && mem->kind &&
+	       mem->drm->client.device.info.platform == NV_DEVICE_INFO_V0_SOC;
+}
+
 int
 nouveau_mem_map(struct nouveau_mem *mem,
 		struct nvif_vmm *vmm, struct nvif_vma *vma)
@@ -58,7 +76,8 @@ nouveau_mem_map(struct nouveau_mem *mem,
 	case NVIF_CLASS_VMM_GM200:
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
-		if (mem->mem.type & NVIF_MEM_VRAM)
+		if ((mem->mem.type & NVIF_MEM_VRAM) ||
+		    nouveau_mem_soc_gpu_only(mem))
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
@@ -100,6 +119,14 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 	else
 		type = drm->ttm.type_host[0];
 
+	/* Tegra: BOs that nouveau_bo_alloc gave big pages ask for 128K
+	 * pages; mmu/mem.c grants them only for contiguous dma[].
+	 */
+	const struct nouveau_bo *nvbo = reg->bo ? nouveau_bo(reg->bo) : NULL;
+	const u8 page = nvbo && nvbo->page == 17 &&
+		drm->client.device.info.platform == NV_DEVICE_INFO_V0_SOC ?
+		17 : PAGE_SHIFT;
+
 	if (mem->kind && !(mmu->type[type].type & NVIF_MEM_KIND))
 		mem->comp = mem->kind = 0;
 	if (mem->comp && !(mmu->type[type].type & NVIF_MEM_COMP)) {
@@ -114,10 +141,16 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 		args.dma = tt->dma_address;
 
 	mutex_lock(&drm->client_mutex);
-	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type, PAGE_SHIFT,
+	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type, page,
 				 reg->size,
 				 &args, sizeof(args), &mem->mem);
 	mutex_unlock(&drm->client_mutex);
+
+	/* Discontiguous chunks got 4K: the BO stays 4K from now on, so no
+	 * later bind or move sees a big-page BO over small-page memory.
+	 */
+	if (!ret && nvbo && nvbo->page > mem->mem.page)
+		((struct nouveau_bo *)nvbo)->page = mem->mem.page;
 	return ret;
 }
 

@@ -155,6 +155,10 @@ void tegra_pmc_r2p_do_reboot(void)
 	if (r2p_device == NULL)
 		return;
 
+	/* T210B01 reboots through the bootrom reset commands */
+	if (of_machine_is_compatible("nvidia,tegra210b01"))
+		return;
+
 	/*
 	 * Hand off to TZ so it relaunches hekate from the preloaded payload
 	 * with the boot config we just stored via SET_BIN_CFG. Without this
@@ -174,6 +178,7 @@ void tegra_pmc_r2p_setup(const char *cmd, bool panic_occurred)
 	struct rtc_reboot_reason rr = {};
 	struct hekate_boot_cfg hekate_bcfg = {};
 	struct reboot_driver_state *state;
+	bool tegra210b01 = of_machine_is_compatible("nvidia,tegra210b01");
 
 	uint32_t reboot_reason = REBOOT_REASON_NOP;
 
@@ -214,6 +219,8 @@ void tegra_pmc_r2p_setup(const char *cmd, bool panic_occurred)
 	/* Prepare boot config data */
 	switch (reboot_reason) {
 	case REBOOT_REASON_NOP:
+		if (tegra210b01)
+			return;
 		break;
 	case REBOOT_REASON_REC:
 	case REBOOT_REASON_SELF:
@@ -248,8 +255,19 @@ void tegra_pmc_r2p_setup(const char *cmd, bool panic_occurred)
 	}
 
 	/* Notify TZ to use its preloaded payload */
-	/* Set hekate boot config. */
-	tegra_pmc_r2p_set_cfg(&hekate_bcfg);
+	if (!tegra210b01) {
+		/* Set hekate boot config. */
+		tegra_pmc_r2p_set_cfg(&hekate_bcfg);
+	} else {
+		struct tegra_br_cmd_cfg bcfg[4] = {
+			{ 0, 0, rr.enc.val1 },
+			{ 0, 1, rr.enc.val2 },
+			{ 0, 2, RTC_REBOOT_REASON_MAGIC },
+			{ 0, 3, RTC_REBOOT_REASON_MAGIC }
+		};
+
+		tegra_pmc_edit_bootrom_scratch_reset(NULL, bcfg, 4);
+	}
 }
 
 static ssize_t action_show(struct device *dev,

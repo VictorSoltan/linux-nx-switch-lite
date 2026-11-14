@@ -6,6 +6,7 @@
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
@@ -33,6 +34,8 @@ struct tegra186_emc {
 	struct device *dev;
 	struct clk *clk;
 	struct clk *clk_dbb;
+	unsigned long resume_rate;
+	bool tegra210b01;
 
 	struct tegra186_emc_dvfs *dvfs;
 	unsigned int num_dvfs;
@@ -90,6 +93,20 @@ static int emc_request_rate(struct tegra186_emc *emc,
 		dev_err_ratelimited(emc->dev, "%s: type %u: out of range: %lu %lu\n",
 				    __func__, type, min_rate, max_rate);
 		return -ERANGE;
+	}
+
+	/* BPMP may round down: an ICC vote is a bandwidth floor. */
+	if (emc->tegra210b01 && emc->num_dvfs) {
+		unsigned long rounded = ULONG_MAX;
+
+		for (i = 0; i < emc->num_dvfs; i++)
+			if (emc->dvfs[i].rate >= min_rate)
+				rounded = min(rounded, emc->dvfs[i].rate);
+
+		if (rounded == ULONG_MAX || rounded > max_rate)
+			return -ERANGE;
+
+		min_rate = rounded;
 	}
 
 	err = clk_set_rate(emc->clk, min_rate);
@@ -331,7 +348,7 @@ static int tegra186_emc_icc_set_bw(struct icc_node *src, struct icc_node *dst)
 	unsigned long long peak_bw = icc_units_to_bps(dst->peak_bw);
 	unsigned long long avg_bw = icc_units_to_bps(dst->avg_bw);
 	unsigned long long rate = max(avg_bw, peak_bw);
-	const unsigned int ddr = 2;
+	unsigned int bytes_per_cycle = 2;
 	int err;
 
 	/*
@@ -346,8 +363,23 @@ static int tegra186_emc_icc_set_bw(struct icc_node *src, struct icc_node *dst)
 	 * EMC clock rate is twice smaller than the peak data rate because
 	 * data is sampled on both EMC clock edges.
 	 */
-	do_div(rate, ddr);
+	/* T210B01 uses the T210 MC/OPP units: DDR x eight-byte bus. */
+	if (emc->tegra210b01) {
+		bytes_per_cycle *= 8;
+		rate += bytes_per_cycle - 1;
+	}
+	do_div(rate, bytes_per_cycle);
 	rate = min_t(u64, rate, U32_MAX);
+
+	/* Concurrent consumers can request more than physical peak capacity. */
+	if (emc->tegra210b01 && emc->num_dvfs) {
+		unsigned long maximum = 0;
+		unsigned int i;
+
+		for (i = 0; i < emc->num_dvfs; i++)
+			maximum = max(maximum, emc->dvfs[i].rate);
+		rate = min_t(u64, rate, maximum);
+	}
 
 	err = emc_set_min_rate(emc, rate, EMC_RATE_ICC);
 	if (err)
@@ -457,6 +489,10 @@ static int tegra186_emc_probe(struct platform_device *pdev)
 	if (!emc)
 		return -ENOMEM;
 
+	mutex_init(&emc->rate_lock);
+	emc->tegra210b01 = of_device_is_compatible(pdev->dev.of_node,
+						 "nvidia,tegra210b01-emc");
+
 	emc->bpmp = tegra_bpmp_get(&pdev->dev);
 	if (IS_ERR(emc->bpmp))
 		return dev_err_probe(&pdev->dev, PTR_ERR(emc->bpmp),
@@ -542,6 +578,27 @@ static void tegra186_emc_remove(struct platform_device *pdev)
 	tegra_bpmp_put(emc->bpmp);
 }
 
+static int tegra186_emc_suspend(struct device *dev)
+{
+	struct tegra186_emc *emc = dev_get_drvdata(dev);
+
+	/* SC7 expects the boot rate, as on L4T */
+	emc->resume_rate = clk_get_rate(emc->clk);
+
+	return clk_set_rate(emc->clk, 204000000);
+}
+
+static int tegra186_emc_resume(struct device *dev)
+{
+	struct tegra186_emc *emc = dev_get_drvdata(dev);
+
+	return clk_set_rate(emc->clk, emc->resume_rate);
+}
+
+static const struct dev_pm_ops tegra186_emc_pm_ops = {
+	LATE_SYSTEM_SLEEP_PM_OPS(tegra186_emc_suspend, tegra186_emc_resume)
+};
+
 static const struct of_device_id tegra186_emc_of_match[] = {
 #if defined(CONFIG_ARCH_TEGRA_186_SOC)
 	{ .compatible = "nvidia,tegra186-emc" },
@@ -571,6 +628,7 @@ static struct platform_driver tegra186_emc_driver = {
 		.of_match_table = tegra186_emc_of_match,
 		.suppress_bind_attrs = true,
 		.sync_state = icc_sync_state,
+		.pm = pm_sleep_ptr(&tegra186_emc_pm_ops),
 	},
 	.probe = tegra186_emc_probe,
 	.remove = tegra186_emc_remove,

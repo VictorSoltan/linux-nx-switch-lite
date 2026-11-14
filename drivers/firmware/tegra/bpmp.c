@@ -13,6 +13,7 @@
 #include <linux/pm.h>
 #include <linux/semaphore.h>
 #include <linux/sched/clock.h>
+#include <linux/syscore_ops.h>
 
 #include <soc/tegra/bpmp.h>
 #include <soc/tegra/bpmp-abi.h>
@@ -862,6 +863,58 @@ static int __maybe_unused tegra_bpmp_resume(struct device *dev)
 	else
 		return 0;
 }
+
+/* T210B01: the BPMP firmware runs SC7 entry itself, it has to be told first */
+#define MRQ_ENABLE_SUSPEND	17
+#define TEGRA_PM_SC7		23
+
+static int tegra_bpmp_sc7_suspend(void *data)
+{
+	__le32 req[2] = { cpu_to_le32(TEGRA_PM_SC7), 0 };
+	struct tegra_bpmp_message msg = {
+		.mrq = MRQ_ENABLE_SUSPEND,
+		.tx = { .data = req, .size = sizeof(req) },
+		.flags = TEGRA_BPMP_MESSAGE_RESET,
+	};
+
+	return tegra_bpmp_transfer_atomic(data, &msg);
+}
+
+static const struct syscore_ops tegra_bpmp_sc7_ops = {
+	.suspend = tegra_bpmp_sc7_suspend,
+};
+
+static struct syscore tegra_bpmp_sc7_syscore = {
+	.ops = &tegra_bpmp_sc7_ops,
+};
+
+/* Registered late so that the callback runs before timekeeping suspends */
+static int __init tegra_bpmp_sc7_init(void)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+
+	if (!of_machine_is_compatible("nvidia,tegra210b01"))
+		return 0;
+
+	np = of_find_compatible_node(NULL, NULL, "nvidia,tegra210-bpmp");
+	if (!np)
+		return 0;
+
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return 0;
+
+	tegra_bpmp_sc7_syscore.data = platform_get_drvdata(pdev);
+	if (tegra_bpmp_sc7_syscore.data)
+		register_syscore(&tegra_bpmp_sc7_syscore);
+
+	put_device(&pdev->dev);
+
+	return 0;
+}
+late_initcall(tegra_bpmp_sc7_init);
 
 static const struct dev_pm_ops tegra_bpmp_pm_ops = {
 	.suspend_noirq = tegra_bpmp_suspend,

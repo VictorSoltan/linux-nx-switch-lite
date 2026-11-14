@@ -346,6 +346,8 @@ struct brcmf_pciedev_info {
 	struct brcmf_pcie_shared_info shared;
 	wait_queue_head_t mbdata_resp_wait;
 	bool mbdata_completed;
+	bool pm_suspending;
+	bool pm_d3_ack_failed;
 	bool irq_allocated;
 	bool wowl_enabled;
 	u8 dma_idx_sz;
@@ -827,7 +829,15 @@ static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo)
 	}
 	if (dtoh_mb_data & BRCMF_D2H_DEV_FWHALT) {
 		brcmf_dbg(PCIE, "D2H_MB_DATA: FW HALT\n");
-		brcmf_fw_crashed(&devinfo->pdev->dev);
+		if (devinfo->pm_suspending && !devinfo->wowl_enabled) {
+			/* Do not rebuild netdevs while their PCI parent is suspending.
+			 * The normal resume path will cold-reprobe this failed firmware.
+			 */
+			devinfo->pm_d3_ack_failed = true;
+			wake_up(&devinfo->mbdata_resp_wait);
+		} else {
+			brcmf_fw_crashed(&devinfo->pdev->dev);
+		}
 	}
 }
 
@@ -2643,18 +2653,28 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 	bus = dev_get_drvdata(dev);
 	devinfo = bus->bus_priv.pcie->devinfo;
 
+	devinfo->pm_suspending = true;
+	devinfo->pm_d3_ack_failed = false;
 	brcmf_pcie_fwcon_timer(devinfo, false);
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 
 	devinfo->mbdata_completed = false;
 	brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
 
-	wait_event_timeout(devinfo->mbdata_resp_wait, devinfo->mbdata_completed,
+	wait_event_timeout(devinfo->mbdata_resp_wait,
+			   devinfo->mbdata_completed || devinfo->pm_d3_ack_failed,
 			   BRCMF_PCIE_MBDATA_TIMEOUT);
-	if (!devinfo->mbdata_completed) {
-		brcmf_err(bus, "Timeout on response for entering D3 substate\n");
-		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
-		return -EIO;
+	if (!devinfo->mbdata_completed || devinfo->pm_d3_ack_failed) {
+		if (devinfo->wowl_enabled) {
+			devinfo->pm_suspending = false;
+			brcmf_err(bus, "Timeout on response for entering D3 substate\n");
+			brcmf_bus_change_state(bus, BRCMF_BUS_UP);
+			return -EIO;
+		}
+
+		brcmf_dbg(PCIE, "No D3 ACK, continuing to power the device off\n");
+		devinfo->pm_d3_ack_failed = true;
+		brcmf_pcie_intr_disable(devinfo);
 	}
 
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
@@ -2676,8 +2696,10 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	devinfo = bus->bus_priv.pcie->devinfo;
 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
 
-	/* Check if device is still up and running, if so we are ready */
-	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
+	devinfo->pm_suspending = false;
+	/* A failed D3 handshake requires cold recovery even with a live INTMASK. */
+	if (!devinfo->pm_d3_ack_failed &&
+	    brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
 		if (brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D0_INFORM))
 			goto cleanup;

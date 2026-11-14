@@ -88,7 +88,7 @@
 					GPC2CLK_OUT_VCODIV_SHIFT)
 #define GPC2CLK_OUT_BYPDIV_WIDTH	6
 #define GPC2CLK_OUT_BYPDIV_SHIFT	0
-#define GPC2CLK_OUT_BYPDIV31		0x3c
+#define GPC2CLK_OUT_BYPDIV1		0
 #define GPC2CLK_OUT_INIT_MASK	((MASK(GPC2CLK_OUT_SDIV14_INDIV4_WIDTH) << \
 		GPC2CLK_OUT_SDIV14_INDIV4_SHIFT)\
 		| (MASK(GPC2CLK_OUT_VCODIV_WIDTH) << GPC2CLK_OUT_VCODIV_SHIFT)\
@@ -96,7 +96,7 @@
 #define GPC2CLK_OUT_INIT_VAL	((GPC2CLK_OUT_SDIV14_INDIV4_MODE << \
 		GPC2CLK_OUT_SDIV14_INDIV4_SHIFT) \
 		| (GPC2CLK_OUT_VCODIV1 << GPC2CLK_OUT_VCODIV_SHIFT) \
-		| (GPC2CLK_OUT_BYPDIV31 << GPC2CLK_OUT_BYPDIV_SHIFT))
+		| (GPC2CLK_OUT_BYPDIV1 << GPC2CLK_OUT_BYPDIV_SHIFT))
 
 /* All frequencies in Khz */
 struct gk20a_clk_pllg_params {
@@ -122,6 +122,9 @@ struct gk20a_clk {
 
 	u32 (*div_to_pl)(u32);
 	u32 (*pl_to_div)(u32);
+
+	/* GPC PLL C1: PL moves directly while the VCO runs, no bypass */
+	bool pl_direct;
 };
 #define gk20a_clk(p) container_of((p), struct gk20a_clk, base)
 

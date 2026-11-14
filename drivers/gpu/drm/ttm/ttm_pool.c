@@ -183,6 +183,14 @@ static struct page *ttm_pool_alloc_page(struct ttm_pool *pool, gfp_t gfp_flags,
 	if (beneficial_order && order > beneficial_order)
 		gfp_flags &= ~__GFP_DIRECT_RECLAIM;
 
+	/*
+	 * local 0049: a device that needs whole chunks of its beneficial order
+	 * (Tegra GM20B: 128K GPU pages only over contiguous 128K chunks) gets
+	 * real compaction for exactly that order instead of a single cheap try.
+	 */
+	if (beneficial_order && order == beneficial_order)
+		gfp_flags = (gfp_flags & ~__GFP_NORETRY) | __GFP_RETRY_MAYFAIL;
+
 	if (!ttm_pool_uses_dma_alloc(pool)) {
 		p = alloc_pages_node(pool->nid, gfp_flags, order);
 		if (p) {

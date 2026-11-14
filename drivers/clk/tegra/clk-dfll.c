@@ -199,7 +199,7 @@
  */
 
 /* MAX_DFLL_VOLTAGES: number of LUT entries in the DFLL IP block */
-#define MAX_DFLL_VOLTAGES		33
+#define MAX_DFLL_VOLTAGES		64
 
 /*
  * REF_CLK_CYC_PER_DVCO_SAMPLE: the number of ref_clk cycles that the hardware
@@ -1693,7 +1693,12 @@ static void dfll_init_out_if(struct tegra_dfll *td)
 
 	td->thermal_cap_output = td->lut_size - 1;
 	if (td->soc->thermal_cap_table_size) {
-		index = td->soc->thermal_cap_table_size - 1;
+		/*
+		 * Start uncapped: there is no DFLL-cap cooling device on this
+		 * kernel, the hottest entry (1010 mV) would stay forever and
+		 * hold the CPU near 2360 MHz at a requested 2601.
+		 */
+		index = 0;
 		mv = td->soc->thermal_cap_table[index].millivolts;
 		td->thermal_cap_output = find_mv_out_floor(td, mv);
 		td->thermal_cap_index = index;
@@ -3081,6 +3086,19 @@ static int dfll_build_i2c_lut(struct tegra_dfll *td, int v_max)
 		if (v >= v_max)
 			break;
 	}
+
+	/*
+	 * Room above the top OPP for the closed loop, up to the voltage L4T
+	 * allows when warm. The DVCO needs more than the CVB value under load.
+	 */
+	while (j < MAX_DFLL_VOLTAGES && v < 1180000) {
+		v += td->soc->alignment.step_uv;
+		selector = find_vdd_map_entry_min(td, v);
+		if (selector < 0)
+			goto out;
+		if (selector != td->lut[j - 1])
+			td->lut[j++] = selector;
+	}
 	td->lut_size = j;
 
 	if (!td->out_rate_min) {
@@ -3122,7 +3140,7 @@ static int dfll_build_lut(struct tegra_dfll *td)
 	if (td->pmu_if == TEGRA_DFLL_PMU_PWM) {
 		return dfll_build_lut_pwm(td, v_max);
 	} else
-		return dfll_build_i2c_lut(td, v_max);
+		return dfll_build_i2c_lut(td, max(v_max, 1180000));
 }
 
 /*
@@ -3892,8 +3910,8 @@ void tegra_dfll_suspend(struct platform_device *pdev)
 	if (td->mode <= DFLL_DISABLED)
 		return;
 
-	td->thermal_cap_index =
-		tegra_dfll_count_thermal_states(td, TEGRA_DFLL_THERMAL_CAP);
+	/* No DFLL-cap cooling device here to lift the cap again after resume. */
+	td->thermal_cap_index = 0;
 	td->thermal_floor_index = 0;
 	set_dvco_rate_min(td, &td->last_req);
 
@@ -3992,6 +4010,47 @@ int tegra_dfll_resume_tuning(struct device *dev)
 
 	return 0;
 }
+
+/**
+ * tegra_dfll_resume_early - reprogram the DFLL after SC7
+ * @dev: DFLL instance
+ *
+ * SC7 powers the DFLL down with the SoC: warmboot brings the CPU back on
+ * PLLP and the DFLL registers at their reset values. cpufreq resume then
+ * enables the DFLL and switches the CPU to it, so the boot-time register
+ * setup from dfll_init() has to be redone first. Runtime PM is still
+ * disabled in this phase, so the DFLL clocks are switched directly.
+ */
+int tegra_dfll_resume_early(struct device *dev)
+{
+	struct tegra_dfll *td = dev_get_drvdata(dev);
+	int ret;
+
+	if (td->mode == DFLL_DISABLED) {
+		reset_control_deassert(td->dvco_rst);
+
+		ret = tegra_dfll_runtime_resume(dev);
+		if (ret)
+			return ret;
+
+		dfll_set_mode(td, DFLL_DISABLED);
+		dfll_set_default_params(td);
+
+		if (td->soc->init_clock_trimmers)
+			td->soc->init_clock_trimmers();
+
+		dfll_set_open_loop_config(td);
+		dfll_init_out_if(td);
+
+		tegra_dfll_runtime_suspend(dev);
+	} else {
+		dev_warn(dev, "resumed in %s mode, not reprogrammed\n",
+			 mode_name[td->mode]);
+	}
+
+	return tegra_dfll_resume_tuning(dev);
+}
+EXPORT_SYMBOL(tegra_dfll_resume_early);
 
 /*
  * API exported to per-SoC platform drivers

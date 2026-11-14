@@ -198,11 +198,17 @@ nvkm_cstate_prog(struct nvkm_clk *clk, struct nvkm_pstate *pstate, int cstatei)
 		clk->func->tidy(clk);
 	}
 
+	/* A failed clock/NA transition must never be followed by undervolting. */
+	if (ret)
+		return ret;
+
 	if (volt) {
 		ret = nvkm_volt_set_id(volt, cstate->voltage,
 				       pstate->base.voltage, clk->temp, -1);
-		if (ret && ret != -ENODEV)
+		if (ret && ret != -ENODEV) {
 			nvkm_error(subdev, "failed to lower voltage: %d\n", ret);
+			return ret;
+		}
 	}
 
 	if (therm) {
@@ -301,7 +307,7 @@ nvkm_pstate_work(struct work_struct *work)
 {
 	struct nvkm_clk *clk = container_of(work, typeof(*clk), work);
 	struct nvkm_subdev *subdev = &clk->subdev;
-	int pstate;
+	int pstate, changed = 0, ret = 0;
 
 	if (!atomic_xchg(&clk->waiting, 0))
 		return;
@@ -321,14 +327,21 @@ nvkm_pstate_work(struct work_struct *work)
 	}
 
 	nvkm_trace(subdev, "-> %d\n", pstate);
-	if (pstate != clk->pstate) {
-		int ret = nvkm_pstate_prog(clk, pstate);
+	if (pstate >= 0)
+		changed = nvkm_volt_prepare(subdev->device->volt);
+	if (changed < 0) {
+		ret = changed;
+	} else if (pstate != clk->pstate || changed) {
+		ret = nvkm_pstate_prog(clk, pstate);
+		if (changed)
+			nvkm_volt_complete(subdev->device->volt, ret);
 		if (ret) {
+			clk->pstate = -1;
 			nvkm_error(subdev, "error setting pstate %d: %d\n",
 				   pstate, ret);
 		}
 	}
-
+	WRITE_ONCE(clk->reclock_error, ret);
 	wake_up_all(&clk->wait);
 }
 
@@ -338,8 +351,17 @@ nvkm_pstate_calc(struct nvkm_clk *clk, bool wait)
 	atomic_set(&clk->waiting, 1);
 	schedule_work(&clk->work);
 	if (wait)
-		wait_event(clk->wait, !atomic_read(&clk->waiting));
+		/* waiting is cleared at worker entry, before clock work finishes. */
+		flush_work(&clk->work);
 	return 0;
+}
+
+int nvkm_clk_update_volt(struct nvkm_clk *clk)
+{
+	if (!clk)
+		return -ENODEV;
+	nvkm_pstate_calc(clk, true);
+	return READ_ONCE(clk->reclock_error);
 }
 
 static void
@@ -580,6 +602,10 @@ static int
 nvkm_clk_fini(struct nvkm_subdev *subdev, enum nvkm_suspend_state suspend)
 {
 	struct nvkm_clk *clk = nvkm_clk(subdev);
+	int ret = nvkm_volt_active(subdev->device->volt, false);
+
+	if (ret)
+		return ret;
 	flush_work(&clk->work);
 	if (clk->func->fini)
 		clk->func->fini(clk);
@@ -609,8 +635,12 @@ nvkm_clk_init(struct nvkm_subdev *subdev)
 
 	nvkm_pstate_info(clk, &clk->bstate);
 
-	if (clk->func->init)
-		return clk->func->init(clk);
+	if (clk->func->init) {
+		ret = clk->func->init(clk);
+		if (!ret)
+			ret = nvkm_volt_active(subdev->device->volt, true);
+		return ret;
+	}
 
 	clk->astate = clk->state_nr - 1;
 	clk->dstate = 0;

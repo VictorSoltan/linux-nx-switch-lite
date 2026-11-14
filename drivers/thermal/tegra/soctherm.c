@@ -765,6 +765,9 @@ static int tegra_soctherm_set_hwtrips(struct device *dev,
 		return 0;
 	}
 
+	/* The critical value above left no throttling step before shutdown */
+	temperature = hot_trip->temperature;
+
 	for (i = 0; i < THROTTLE_OC1; i++) {
 		struct thermal_cooling_device *cdev;
 

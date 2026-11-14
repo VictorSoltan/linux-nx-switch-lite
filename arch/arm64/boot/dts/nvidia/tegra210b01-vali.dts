@@ -1,11 +1,91 @@
 // SPDX-License-Identifier: GPL-2.0
 /dts-v1/;
 
+#include <dt-bindings/input/linux-event-codes.h>
+
 #include "tegra210b01-nx.dtsi"
 
 / {
 	model = "Nintendo Switch Lite";
 	compatible = "nvidia,vali", "nintendo,hoag", "nintendo,nx", "nvidia,tegra210b01", "nvidia,tegra210";
+
+	i2c@7000c000 {
+		fuel-gauge@36 {
+			/* The gauge's status needs the charger power-supply relation. */
+			power-supplies = <&{/i2c@7000c000/bq24193@6b}>;
+		};
+	};
+
+	actmon@6000c800 {
+		operating-points-v2 = <&vali_emc_bw_opp_table>;
+	};
+
+	gpu@57000000 {
+		interconnects = <&mc TEGRA210_MC_GPUSRD &emc>,
+				<&mc TEGRA210_MC_GPUSWR &emc>,
+				<&mc TEGRA210_MC_GPUSRD2 &emc>,
+				<&mc TEGRA210_MC_GPUSWR2 &emc>;
+		interconnect-names = "dma-mem", "write-0", "read-1", "write-1";
+	};
+
+	/* Frequencies reported by this Lite's BPMP, retaining RAM2533. */
+	vali_emc_bw_opp_table: opp-table-actmon-vali {
+		compatible = "operating-points-v2";
+
+		opp-204000000 {
+			opp-hz = /bits/ 64 <204000000>;
+			opp-peak-kBps = <3264000>;
+			opp-supported-hw = <0x4>;
+		};
+		opp-1331200000 {
+			opp-hz = /bits/ 64 <1331200000>;
+			opp-peak-kBps = <21299200>;
+			opp-supported-hw = <0x4>;
+		};
+		opp-1600000000 {
+			opp-hz = /bits/ 64 <1600000000>;
+			opp-peak-kBps = <25600000>;
+			opp-supported-hw = <0x4>;
+		};
+		opp-2533000000 {
+			opp-hz = /bits/ 64 <2533000000>;
+			opp-peak-kBps = <40528000>;
+			opp-supported-hw = <0x4>;
+		};
+	};
+
+	/* serial-tegra refuses a port without an alias. */
+	aliases {
+		mmc0 = "/mmc@700b0000";
+		mmc1 = "/mmc@700b0600";
+		serial2 = &uartc;
+		serial3 = &uartd;
+	};
+
+	/* eMMC, owner 02.11: visible for the swap partition of lean1018 only. boot.scr emmc=1 would also move the kernel load to eMMC, so emmc stays 0 in the ini. prep-fedora.sh sets the chip read-only. */
+	mmc@700b0600 {
+		status = "okay";
+	};
+
+	/*
+	 * SD in DDR200 as on L4T/lean: the host clock is twice the card clock,
+	 * 998.4/2.5 = 399.36 MHz from PLL_C4_OUT0, like lean. PLL_C4 keeps its
+	 * rate, so the eMMC on PLL_C4_OUT2 is unaffected. A failed DDR200
+	 * tuning falls back to SDR104 in the core.
+	 * DDR200 runs in DDR50 timing, which uses the 1.8 V autocal offsets;
+	 * lean runs it with PU/PD offset 6 (live AUTO_CAL_CONFIG 0x20010606),
+	 * the Tegra210 0x7b weakened the pads and gave CRC errors.
+	 */
+	mmc@700b0000 {
+		assigned-clocks = <&tegra_car TEGRA210_CLK_SDMMC1>;
+		assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_C4_OUT0>;
+		nvidia,pad-autocal-pull-up-offset-1v8 = <0x06>;
+		nvidia,pad-autocal-pull-down-offset-1v8 = <0x06>;
+		nvidia,sd-ddr200;
+		/* EMC floor while DDR200 transfers run, as L4T's 550 MHz request. */
+		interconnects = <&mc TEGRA210_MC_SDMMCRA &emc>;
+		interconnect-names = "dma-mem";
+	};
 
     /* Joycon/Fan power (usb) */
 	v_vdd50_b: v-vdd50-b {
@@ -18,6 +98,71 @@
 
 	en_vdd_jcr_chgr: right-joycon-charger {
 		status = "disabled"; /* Only enabled on Odin/Modin/Fric */
+	};
+
+	/* Bluetooth */
+	serial@70006300 {
+		dma-names = "tx";
+		status = "okay";
+		compatible = "nvidia,tegra124-hsuart", "nvidia,tegra30-hsuart";
+		reset-names = "serial";
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_bt_default>;
+
+		bluetooth {
+			compatible = "brcm,bcm43438-bt";
+			vbat-supply = <&battery_reg>;
+			vddio-supply = <&battery_reg>;
+			shutdown-gpios = <&gpio TEGRA_GPIO(H, 4) GPIO_ACTIVE_HIGH>;
+			device-wakeup-gpios = <&gpio TEGRA_GPIO(H, 3) GPIO_ACTIVE_LOW>;
+			max-speed = <3000000>;
+			sco-routing = <1>;
+		};
+	};
+
+	/* Wi-Fi: L4T keeps RF Disable low; the reset line belongs to the PCIe driver. */
+	pcie@1003000 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_wifi_default>;
+	};
+
+	gpio@6000d000 {
+		wifi-rf-disable {
+			gpio-hog;
+			gpios = <TEGRA_GPIO(H, 0) GPIO_ACTIVE_HIGH>;
+			output-low;
+		};
+	};
+
+	vali_cell: vali-battery {
+		compatible = "simple-battery";
+		constant-charge-current-max-microamp = <1664000>;
+		constant-charge-voltage-max-microvolt = <4208000>;
+	};
+
+	/* Fan power (battery). Maxim MAX8969EWL53+. */
+	v_vdd50_a: v-vdd50-a {
+		compatible = "regulator-fixed";
+		regulator-name = "v_vdd50_a";
+		regulator-min-microvolt = <5300000>;
+		regulator-max-microvolt = <5300000>;
+		gpio = <&gpio TEGRA_GPIO(A, 5) 0>;
+		enable-active-high;
+	};
+
+	/* Duty is inverted (L4T polarity 1: 28774 of 33333 ns at pwm 35, i.e.
+	 * (256 - pwm) / 256 of the period). The top level stays above 0, where
+	 * pwm-fan would turn the output off. Levels are L4T pwm 0, 51, 77, 102,
+	 * 128, 153, 204, 255 (0, 20 ... 100 %), the steps of the vendor curve.
+	 */
+	fan: pwm-fan {
+		compatible = "pwm-fan";
+		#cooling-cells = <2>;
+		pwms = <&pwm 1 33333>;
+		fan-supply = <&v_vdd50_a>;
+		cooling-levels = <255 204 178 153 128 103 52 1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_fan_default>;
 	};
 
 	spi@7000da00 {
@@ -36,6 +181,14 @@
 	/* Left Joycon / Sio */
 	serial@70006200 {
 		status = "okay";
+		compatible = "nvidia,tegra124-hsuart", "nvidia,tegra30-hsuart";
+		reset-names = "serial";
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_sio_default>;
+		/* Sio runs from 4 MHz; only the platform parent applies assigned clocks. */
+		assigned-clocks = <&tegra_car TEGRA210_CLK_EXTERN2>;
+		assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_P>;
+		assigned-clock-rates = <4000000>;
 		/delete-property/ nvidia,invert-txd;
 		/delete-property/ nvidia,invert-rts;
 
@@ -43,23 +196,64 @@
 			status = "disabled";
 		};
 
+		/* clk_out_2 holds both the L4T mux and gate since it moved to the PMC. */
 		sio {
 			status = "okay";
+			compatible = "nintendo,joycon-serdev";
+			nintendo,sio;
+			nintendo,sio-home-gpio = <&gpio TEGRA_GPIO(V, 3) 1>;
+			nintendo,sio-por-gpio = <&gpio TEGRA_GPIO(CC, 5) 0>;
+			nintendo,sio-rst-gpio = <&gpio TEGRA_GPIO(T, 1) 0>;
+			clocks = <&tegra_pmc TEGRA_PMC_CLK_OUT_2>,
+				 <&tegra_pmc TEGRA_PMC_CLK_OUT_2>,
+				 <&tegra_car TEGRA210_CLK_EXTERN2>,
+				 <&tegra_car TEGRA210_CLK_PLL_P>;
+			clock-names = "sio_clk", "sio_pclk_mux", "sio_pclk", "sio_pclk_pll";
+			sio-clock-rate = <4000000>;
+			sio-stick-cnt-off-l = <0 0xFFFFFF00>;
+			sio-stick-cnt-off-r = <0xFFFFFF00 0>;
 		};
 	};
 
 	i2c@7000c000 {
+		audio-codec@1c {
+			pinctrl-names = "default";
+			pinctrl-0 = <&vali_codec_default>;
+			clocks = <&tegra_pmc TEGRA_PMC_CLK_OUT_1>;
+			clock-names = "mclk";
+			realtek,speaker-eq;
+			assigned-clocks = <&tegra_pmc TEGRA_PMC_CLK_OUT_1>;
+			assigned-clock-parents = <&tegra_car TEGRA210_CLK_EXTERN1>;
+
+			port {
+				rt5639_ep: endpoint {
+					remote-endpoint = <&i2s1_dap_ep>;
+					mclk-fs = <256>;
+				};
+			};
+		};
+
 		bm92t: bm92t@18 {
-			status = "disabled";
+			status = "okay";
+			interrupts = <TEGRA_GPIO(K, 4) IRQ_TYPE_LEVEL_LOW>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&vali_bm92_irq_default>;
 			/delete-property/ rohm,dp-signal-toggle-on-resume;
 			rohm,dp-disable;
 			rohm,pd-5v-current-limit-ma = <2000>;
 			rohm,pd-9v-current-limit-ma = <1500>;
 			rohm,pd-12v-current-limit-ma = <1200>;
 			rohm,pd-15v-current-limit-ma = <900>;
+			/* The driver reads only these names; the -ma ones above it were ignored. */
+			rohm,pd-5v-input-current-limit-microamp = <2000000>;
+			rohm,pd-9v-input-current-limit-microamp = <1500000>;
+			rohm,pd-12v-input-current-limit-microamp = <1200000>;
+			rohm,pd-15v-input-current-limit-microamp = <900000>;
 		};
 
 		bq2419x: bq24193@6b {
+			/* bq24190 takes limits only from a simple-battery; default would be 2048 mA. */
+			monitored-battery = <&vali_cell>;
 			battery_charger: charger {
 				ti,charge-voltage-limit-millivolt = <4320>; /* Adjusted by cell age */
 				ti,fast-charge-current-limit-milliamp = <1664>;
@@ -70,6 +264,9 @@
 		};
 
 		fuel_gauge: fuel-gauge@36 {
+			/* ALRT stayed asserted while charging and held CPU0 in the GPIO handler at boot. */
+			/delete-property/ interrupts;
+			/delete-property/ interrupt-parent;
 			maxim,over-volt = <4320>; /* Actual: 4370 mV */
 			maxim,kernel-maximum-soc = <100>; /* Adjusted by cell age */
 		};
@@ -77,6 +274,11 @@
 
 	i2c@7000d000 {
 		pmic_b: pmic@3c {
+			/* Wake 51 reaches the PMC: the button must wake SC7 */
+			interrupt-parent = <&tegra_pmc>;
+			interrupts = <51 IRQ_TYPE_LEVEL_LOW>;
+			maxim,system-pmic-power-off;
+
 			regulators {
 				/* Vali: Powers LDO 2V8 for Sio VDD
 				 * Powers LDO 1V8 for I2C1 VDDQ and ALC5639.
@@ -105,9 +307,8 @@
 	xusb: usb@70090000 {
 		status = "okay";
 
-		phys = <&{/padctl@7009f000/pads/usb2/lanes/usb2-0}>,
-			<&{/padctl@7009f000/pads/pcie/lanes/pcie-5}>;
-		phy-names = "usb2-0", "usb3-0";
+		phys = <&{/padctl@7009f000/pads/usb2/lanes/usb2-0}>;
+		phy-names = "usb2-0";
 
 		extcon = <&bm92t 0>;
 		extcon-cable-names = "vbus";
@@ -120,15 +321,809 @@
 	xudc: usb@700d0000 {
 		status = "okay";
 
-		phys = <&{/padctl@7009f000/pads/usb2/lanes/usb2-0}>,
-			<&{/padctl@7009f000/pads/pcie/lanes/pcie-5}>;
-		phy-names = "usb2-0", "usb3-0";
+		phys = <&{/padctl@7009f000/pads/usb2/lanes/usb2-0}>;
+		phy-names = "usb2-0";
 
 		extcon = <&bm92t 1>;
 		extcon-cable-names = "id";
 
 		hvdd-usb-supply = <&vdd_3v3>;
 		avddio-usb-supply = <&max77620_ldo1>;
+	};
+
+	pinmux@700008d4 {
+		/* SD pins and pad as L4T/lean leaves them for DDR200 (live registers 07.11). */
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_sdmmc1_default>;
+
+		vali_sdmmc1_default: vali-sdmmc1-default {
+			sdmmc1_clk_pm0 {
+				nvidia,pins = "sdmmc1_clk_pm0";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+			};
+
+			sdmmc1_cmd_dat {
+				nvidia,pins = "sdmmc1_cmd_pm1", "sdmmc1_dat3_pm2",
+					      "sdmmc1_dat2_pm3", "sdmmc1_dat1_pm4";
+				nvidia,drive-type = <3>;
+			};
+
+			drive_sdmmc1 {
+				nvidia,pins = "drive_sdmmc1";
+				nvidia,slew-rate-rising = <1>;
+				nvidia,slew-rate-falling = <1>;
+			};
+		};
+
+		vali_touch_irq_default: vali-touch-irq-default {
+			gen3_i2c_scl_pf0 {
+				nvidia,pins = "gen3_i2c_scl_pf0";
+				nvidia,function = "i2c3";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				nvidia,io-hv = <TEGRA_PIN_DISABLE>;
+			};
+
+			gen3_i2c_sda_pf1 {
+				nvidia,pins = "gen3_i2c_sda_pf1";
+				nvidia,function = "i2c3";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				nvidia,io-hv = <TEGRA_PIN_DISABLE>;
+			};
+
+			/* Disconnect the unused I2C3 input pair left selected by warm boot. */
+			cam_i2c_scl_ps2 {
+				nvidia,pins = "cam_i2c_scl_ps2";
+				nvidia,function = "rsvd2";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+				nvidia,io-hv = <TEGRA_PIN_ENABLE>;
+			};
+
+			/* Gamecard detect; keep its L4T GPIO input setup. */
+			cam_i2c_sda_ps3 {
+				nvidia,pins = "cam_i2c_sda_ps3";
+				nvidia,function = "rsvd2";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+				nvidia,io-hv = <TEGRA_PIN_DISABLE>;
+			};
+
+			dap4_sclk_pj7 {
+				nvidia,pins = "dap4_sclk_pj7";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			touch_rst_pv6 {
+				nvidia,pins = "touch_rst_pv6";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			touch_int_px1 {
+				nvidia,pins = "touch_int_px1";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_bm92_irq_default: vali-bm92-irq-default {
+			pk4 {
+				nvidia,pins = "pk4";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_wifi_default: vali-wifi-default {
+			wifi_en_ph0 {
+				nvidia,pins = "wifi_en_ph0";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			wifi_rst_ph1 {
+				nvidia,pins = "wifi_rst_ph1";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			wifi_wake_ap_ph2 {
+				nvidia,pins = "wifi_wake_ap_ph2";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			pex_l0_rst_n_pa0 {
+				nvidia,pins = "pex_l0_rst_n_pa0";
+				nvidia,function = "pe0";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			pex_l0_clkreq_n_pa1 {
+				nvidia,pins = "pex_l0_clkreq_n_pa1";
+				nvidia,function = "pe0";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			pex_wake_n_pa2 {
+				nvidia,pins = "pex_wake_n_pa2";
+				nvidia,function = "pe";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			pex_l1_rst_n_pa3 {
+				nvidia,pins = "pex_l1_rst_n_pa3";
+				nvidia,function = "pe1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			pex_l1_clkreq_n_pa4 {
+				nvidia,pins = "pex_l1_clkreq_n_pa4";
+				nvidia,function = "pe1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_bt_default: vali-bt-default {
+			uart4_tx_pi4 {
+				nvidia,pins = "uart4_tx_pi4";
+				nvidia,function = "uartd";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			uart4_rx_pi5 {
+				nvidia,pins = "uart4_rx_pi5";
+				nvidia,function = "uartd";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			uart4_rts_pi6 {
+				nvidia,pins = "uart4_rts_pi6";
+				nvidia,function = "uartd";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			uart4_cts_pi7 {
+				nvidia,pins = "uart4_cts_pi7";
+				nvidia,function = "uartd";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			ap_wake_bt_ph3 {
+				nvidia,pins = "ap_wake_bt_ph3";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			bt_rst_ph4 {
+				nvidia,pins = "bt_rst_ph4";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			bt_wake_ap_ph5 {
+				nvidia,pins = "bt_wake_ap_ph5";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_fan_default: vali-fan-default {
+			lcd_gpio2_pv4 {
+				nvidia,pins = "lcd_gpio2_pv4";
+				nvidia,function = "pwm1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			pa5 {
+				nvidia,pins = "pa5";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			cam1_pwdn_ps7 {
+				nvidia,pins = "cam1_pwdn_ps7";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_sio_default: vali-sio-default {
+			uart3_tx_pd1 {
+				nvidia,pins = "uart3_tx_pd1";
+				nvidia,function = "uartc";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			uart3_rx_pd2 {
+				nvidia,pins = "uart3_rx_pd2";
+				nvidia,function = "uartc";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			uart3_rts_pd3 {
+				nvidia,pins = "uart3_rts_pd3";
+				nvidia,function = "uartc";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			uart3_cts_pd4 {
+				nvidia,pins = "uart3_cts_pd4";
+				nvidia,function = "uartc";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			usb_vbus_en1_pcc5 {
+				nvidia,pins = "usb_vbus_en1_pcc5";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+				nvidia,io-hv = <TEGRA_PIN_ENABLE>;
+			};
+
+			cam2_pwdn_pt0 {
+				nvidia,pins = "cam2_pwdn_pt0";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			cam1_strobe_pt1 {
+				nvidia,pins = "cam1_strobe_pt1";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			touch_clk_pv7 {
+				nvidia,pins = "touch_clk_pv7";
+				nvidia,function = "touch";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			pe7 {
+				nvidia,pins = "pe7";
+				nvidia,function = "rsvd0";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			lcd_gpio1_pv3 {
+				nvidia,pins = "lcd_gpio1_pv3";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_UP>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+		};
+
+		vali_codec_default: vali-codec-default {
+			pz4 {
+				nvidia,pins = "pz4";
+				nvidia,function = "rsvd1";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			aud_mclk_pbb0 {
+				nvidia,pins = "aud_mclk_pbb0";
+				nvidia,function = "aud";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			dap1_fs_pb0 {
+				nvidia,pins = "dap1_fs_pb0";
+				nvidia,function = "i2s1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			dap1_din_pb1 {
+				nvidia,pins = "dap1_din_pb1";
+				nvidia,function = "i2s1";
+				nvidia,pull = <TEGRA_PIN_PULL_DOWN>;
+				nvidia,tristate = <TEGRA_PIN_ENABLE>;
+				nvidia,enable-input = <TEGRA_PIN_ENABLE>;
+			};
+
+			dap1_dout_pb2 {
+				nvidia,pins = "dap1_dout_pb2";
+				nvidia,function = "i2s1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+
+			dap1_sclk_pb3 {
+				nvidia,pins = "dap1_sclk_pb3";
+				nvidia,function = "i2s1";
+				nvidia,pull = <TEGRA_PIN_PULL_NONE>;
+				nvidia,tristate = <TEGRA_PIN_DISABLE>;
+				nvidia,enable-input = <TEGRA_PIN_DISABLE>;
+			};
+		};
+	};
+
+	/* FTM4 touchscreen IRQ is active-low and requires a pull-up. */
+	i2c@7000c500 {
+		touchscreen@49 {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&vali_touch_irq_default>;
+		};
+	};
+
+	/* Hardware path when the kernel is stuck: same PMIC soft reset as r2p. */
+	pmc@7000e400 {
+		i2c-thermtrip {
+			nvidia,i2c-controller-id = <4>;
+			nvidia,bus-addr = <0x3c>;
+			nvidia,reg-addr = <0x41>;
+			nvidia,reg-data = <0x80>;
+		};
+	};
+
+	gpu_voltage_cdev: gpu-voltage-cdev {
+		compatible = "nvidia,tegra210-rail-scaling-cdev";
+		#cooling-cells = <2>;
+	};
+
+	/* The fan follows the vendor (L4T/HOS) Vali tskin estimate from the TMP451,
+	 * not the fast on-die CPU/GPU sensors: those jump at every game start and
+	 * drove the fan to full speed. On-die zones keep only an 80 C fan backstop.
+	 */
+	thermal-zones {
+		/* L4T-only zones without a mainline sensor. Any sensor-less zone makes
+		 * the OF zone lookup fail, so lm90 (TMP451) did not probe at all.
+		 */
+		/delete-node/ PLL-therm;
+		/delete-node/ Tboard_tegra;
+		/delete-node/ Tdiode_tegra;
+		/delete-node/ AO-therm;
+
+		/* L4T therm_tskin_fan_est, Vali coefficients, Console profile:
+		 * tskin = max(0.5235 * Tdiode + 20.48, 0.5594 * Tboard + 21.46) C,
+		 * fan pwm 51 from 36, linear 51..153 over 43..53, 153..255 over
+		 * 53..58 tskin. L4T programs a -12.5 C diode offset; Linux leaves
+		 * the chip register at 0, so the remote trips below are raw diode
+		 * readings (L4T Tdiode + 12.5). Each trip is where the vendor curve
+		 * reaches that fan level.
+		 */
+		soc-diode-thermal {
+			polling-delay-passive = <1000>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmp451 1>;
+			trips {
+				soc_fan1: soc-fan1 {
+					temperature = <42500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan2: soc-fan2 {
+					temperature = <60500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan3: soc-fan3 {
+					temperature = <65000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan4: soc-fan4 {
+					temperature = <70000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan5: soc-fan5 {
+					temperature = <74500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan6: soc-fan6 {
+					temperature = <79500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				soc_fan7: soc-fan7 {
+					temperature = <84000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+			};
+			cooling-maps {
+				fan-map1 {
+					trip = <&soc_fan1>;
+					cooling-device = <&fan 1 1>;
+				};
+				fan-map2 {
+					trip = <&soc_fan2>;
+					cooling-device = <&fan 2 2>;
+				};
+				fan-map3 {
+					trip = <&soc_fan3>;
+					cooling-device = <&fan 3 3>;
+				};
+				fan-map4 {
+					trip = <&soc_fan4>;
+					cooling-device = <&fan 4 4>;
+				};
+				fan-map5 {
+					trip = <&soc_fan5>;
+					cooling-device = <&fan 5 5>;
+				};
+				fan-map6 {
+					trip = <&soc_fan6>;
+					cooling-device = <&fan 6 6>;
+				};
+				fan-map7 {
+					trip = <&soc_fan7>;
+					cooling-device = <&fan 7 7>;
+				};
+			};
+		};
+
+		/* TMP451 local sensor = L4T Tboard (PCB). */
+		board-thermal {
+			polling-delay-passive = <1000>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmp451 0>;
+			trips {
+				board_fan1: board-fan1 {
+					temperature = <26500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan2: board-fan2 {
+					temperature = <43000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan3: board-fan3 {
+					temperature = <47500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan4: board-fan4 {
+					temperature = <52000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan5: board-fan5 {
+					temperature = <56500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan6: board-fan6 {
+					temperature = <61000>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+				board_fan7: board-fan7 {
+					temperature = <65500>;
+					hysteresis = <3000>;
+					type = "active";
+				};
+			};
+			cooling-maps {
+				fan-map1 {
+					trip = <&board_fan1>;
+					cooling-device = <&fan 1 1>;
+				};
+				fan-map2 {
+					trip = <&board_fan2>;
+					cooling-device = <&fan 2 2>;
+				};
+				fan-map3 {
+					trip = <&board_fan3>;
+					cooling-device = <&fan 3 3>;
+				};
+				fan-map4 {
+					trip = <&board_fan4>;
+					cooling-device = <&fan 4 4>;
+				};
+				fan-map5 {
+					trip = <&board_fan5>;
+					cooling-device = <&fan 5 5>;
+				};
+				fan-map6 {
+					trip = <&board_fan6>;
+					cooling-device = <&fan 6 6>;
+				};
+				fan-map7 {
+					trip = <&board_fan7>;
+					cooling-device = <&fan 7 7>;
+				};
+			};
+		};
+
+		cpu-thermal {
+			polling-delay = <1000>;
+			trips {
+				/* Vendor cold floor ends at 20C. Keep a conservative
+				 * 10C margin when using the calibrated on-die CPU group
+				 * instead of the unbound legacy Tdiode_tegra zone.
+				 */
+				cpu_dfll_warm: dfll-warm {
+					temperature = <30000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				throttle-trip {
+					temperature = <90000>; /* Hardware throttle, far above game temperatures */
+				};
+				/* Backstop only, if the TMP451 zone is missing. */
+				cpu_fan_max: cpu-fan-max {
+					temperature = <80000>;
+					hysteresis = <5000>;
+					type = "active";
+				};
+			};
+			cooling-maps {
+				dfll-floor-map {
+					trip = <&cpu_dfll_warm>;
+					cooling-device = <&dfll_floor 1 1>;
+				};
+				fan-map-max {
+					trip = <&cpu_fan_max>;
+					cooling-device = <&fan 7 7>;
+				};
+			};
+		};
+
+		gpu-thermal {
+			polling-delay = <1000>;
+			trips {
+				gpu_voltage_trip1: voltage-range1 {
+					temperature = <20000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				gpu_voltage_trip2: voltage-range2 {
+					temperature = <30000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				gpu_voltage_trip3: voltage-range3 {
+					temperature = <50000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				gpu_voltage_trip4: voltage-range4 {
+					temperature = <70000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				gpu_voltage_trip5: voltage-range5 {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "active";
+				};
+				throttle-trip {
+					temperature = <90000>;
+				};
+				/* Backstop only, if the TMP451 zone is missing. */
+				gpu_fan_max: gpu-fan-max {
+					temperature = <80000>;
+					hysteresis = <5000>;
+					type = "active";
+				};
+			};
+			cooling-maps {
+				voltage-map1 {
+					trip = <&gpu_voltage_trip1>;
+					cooling-device = <&gpu_voltage_cdev 1 1>;
+				};
+				voltage-map2 {
+					trip = <&gpu_voltage_trip2>;
+					cooling-device = <&gpu_voltage_cdev 2 2>;
+				};
+				voltage-map3 {
+					trip = <&gpu_voltage_trip3>;
+					cooling-device = <&gpu_voltage_cdev 3 3>;
+				};
+				voltage-map4 {
+					trip = <&gpu_voltage_trip4>;
+					cooling-device = <&gpu_voltage_cdev 4 4>;
+				};
+				voltage-map5 {
+					trip = <&gpu_voltage_trip5>;
+					cooling-device = <&gpu_voltage_cdev 5 5>;
+				};
+				fan-map-max {
+					trip = <&gpu_fan_max>;
+					cooling-device = <&fan 7 7>;
+				};
+			};
+		};
+	};
+
+	aconnect@702c0000 {
+		status = "okay";
+		/* The boot default leaves APE on clk_m at 19.2 MHz. */
+		assigned-clocks = <&tegra_car TEGRA210_CLK_APE>;
+		assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_P>;
+		assigned-clock-rates = <300000000>;
+
+		ahub@702d0800 {
+			status = "okay";
+
+			admaif@702d0000 {
+				status = "okay";
+			};
+
+			i2s@702d1000 {
+				status = "okay";
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+
+						i2s1_cif_ep: endpoint {
+							remote-endpoint = <&xbar_i2s1_ep>;
+						};
+					};
+
+					i2s1_port: port@1 {
+						reg = <1>;
+
+						i2s1_dap_ep: endpoint {
+							dai-format = "i2s";
+							remote-endpoint = <&rt5639_ep>;
+						};
+					};
+				};
+			};
+
+			ports {
+				xbar_i2s1_port: port@a {
+					reg = <0xa>;
+
+					xbar_i2s1_ep: endpoint {
+						remote-endpoint = <&i2s1_cif_ep>;
+					};
+				};
+			};
+		};
+
+		dma-controller@702e2000 {
+			status = "okay";
+		};
+
+		interrupt-controller@702f9000 {
+			status = "okay";
+		};
+	};
+
+	sound {
+		compatible = "nvidia,tegra210-audio-graph-card";
+		status = "okay";
+		label = "Nintendo Switch Lite";
+
+		dais = <&admaif1_port>, <&admaif2_port>, <&xbar_i2s1_port>, <&i2s1_port>;
+
+		widgets = "Headphone", "Headphones",
+			  "Speaker", "Speakers",
+			  "Microphone", "Mic Jack";
+		/* The DAP link is built with a dummy codec: I2S and RT5639 are joined here. */
+		routing = "AIF1 Playback", "I2S1 DAP-Playback",
+			  "I2S1 DAP-Capture", "AIF1 Capture",
+			  "Headphones", "HPOL",
+			  "Headphones", "HPOR",
+			  "Speakers", "SPORP",
+			  "Speakers", "SPORN",
+			  "Speakers", "SPOLP",
+			  "Speakers", "SPOLN",
+			  "IN1P", "Mic Jack";
+	};
+
+	/* The rails behind these pads are 1.8 V, the reset state is the 3.3 V mode. */
+	pmc@7000e400 {
+		pinctrl-names = "default";
+		pinctrl-0 = <&vali_io_pads_1v8>;
+
+		pinmux {
+			vali_io_pads_1v8: vali-io-pads-1v8 {
+				pins = "audio", "audio-hv", "cam", "dbg", "dmic", "gpio",
+				       "pex-cntrl", "sdmmc3", "spi", "spi-hv", "uart";
+				power-source = <TEGRA_IO_PAD_VOLTAGE_1V8>;
+			};
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		key-volume-down {
+			label = "Volume Down";
+			gpios = <&gpio TEGRA_GPIO(X, 7) GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEDOWN>;
+			debounce-interval = <16>;
+		};
+
+		key-volume-up {
+			label = "Volume Up";
+			gpios = <&gpio TEGRA_GPIO(X, 6) GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+			debounce-interval = <16>;
+		};
+	};
+
+	/* Reboot back into Hekate with a chosen entry; the driver matches this node. */
+	r2p {
+		compatible = "tegra-r2p";
+		status = "okay";
 	};
 
 	padctl@7009f000 {
@@ -138,5 +1133,12 @@
 		avdd-pll-uerefe-supply = <&max77620_ldo1>;
 		dvdd-pex-pll-supply = <&max77620_ldo1>;
 		hvdd-pex-pll-e-supply = <&max77620_sd3>;
+
+		/* USB2 only, as Hekate's usb3_enable=0 does for L4T: Lite enumerates at 480 Mbit/s. */
+		ports {
+			usb3-0 {
+				status = "disabled";
+			};
+		};
 	};
 };

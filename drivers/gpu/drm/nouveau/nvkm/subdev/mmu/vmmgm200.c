@@ -47,6 +47,8 @@ gm200_vmm_lpt = {
 	.unmap = gf100_vmm_pgt_unmap,
 	.sparse = gm200_vmm_pgt_sparse,
 	.mem = gf100_vmm_pgt_mem,
+	/* Tegra: 128K pages over contiguous host chunks (mem.c) */
+	.dma = gf100_vmm_pgt_dma,
 };
 
 static void

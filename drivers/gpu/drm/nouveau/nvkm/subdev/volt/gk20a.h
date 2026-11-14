@@ -35,10 +35,20 @@ struct cvb_coef {
 struct gk20a_volt {
 	struct nvkm_volt base;
 	struct regulator *vdd;
+	struct thermal_cooling_device *thermal_cdev;
+	struct mutex thermal_lock;
+	u32 thermal_uv[6][32];
+	u32 thermal_ref[32];
+	unsigned int thermal_requested, thermal_applied, thermal_next;
+	bool thermal_live;
 };
 
 int gk20a_volt_ctor(struct nvkm_device *device, enum nvkm_subdev_type, int,
 		    const struct cvb_coef *coefs, int nb_coefs,
 		    int vmin, struct gk20a_volt *volt);
+
+int gk20a_volt_ctor_b01(struct nvkm_device *device, enum nvkm_subdev_type, int,
+		      const struct cvb_coef *coefs, int nb_coefs,
+		      int vmin, int thermal_scale, struct gk20a_volt *volt);
 
 #endif

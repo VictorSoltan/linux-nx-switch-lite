@@ -299,9 +299,12 @@ gk20a_pllg_program_mnp(struct gk20a_clk *clk, const struct gk20a_pll *pll)
 	struct nvkm_subdev *subdev = &clk->base.subdev;
 	struct nvkm_device *device = subdev->device;
 	struct gk20a_pll cur_pll;
+	bool pdiv_only;
 	int ret;
 
 	gk20a_pllg_read_mnp(clk, &cur_pll);
+	pdiv_only = clk->pl_direct && gk20a_pllg_is_enabled(clk) &&
+		    cur_pll.m == pll->m && cur_pll.n == pll->n;
 
 	/* split VCO-to-bypass jump in half by setting out divider 1:2 */
 	nvkm_mask(device, GPC2CLK_OUT, GPC2CLK_OUT_VCODIV_MASK,
@@ -312,13 +315,17 @@ gk20a_pllg_program_mnp(struct gk20a_clk *clk, const struct gk20a_pll *pll)
 	nvkm_rd32(device, GPC2CLK_OUT);
 	udelay(2);
 
-	gk20a_pllg_disable(clk);
+	if (pdiv_only) {
+		gk20a_pllg_write_mnp(clk, pll);
+	} else {
+		gk20a_pllg_disable(clk);
 
-	gk20a_pllg_write_mnp(clk, pll);
+		gk20a_pllg_write_mnp(clk, pll);
 
-	ret = gk20a_pllg_enable(clk);
-	if (ret)
-		return ret;
+		ret = gk20a_pllg_enable(clk);
+		if (ret)
+			return ret;
+	}
 
 	/* restore out divider 1:1 */
 	udelay(2);

@@ -32,6 +32,7 @@ struct nvkm_mem {
 	enum nvkm_memory_target target;
 	struct nvkm_mmu *mmu;
 	u64 pages;
+	u8 page;
 	struct page **mem;
 	union {
 		struct scatterlist *sgl;
@@ -48,7 +49,7 @@ nvkm_mem_target(struct nvkm_memory *memory)
 static u8
 nvkm_mem_page(struct nvkm_memory *memory)
 {
-	return PAGE_SHIFT;
+	return nvkm_mem(memory)->page ?: PAGE_SHIFT;
 }
 
 static u64
@@ -83,6 +84,10 @@ static void *
 nvkm_mem_dtor(struct nvkm_memory *memory)
 {
 	struct nvkm_mem *mem = nvkm_mem(memory);
+	/* Raw maps leave one comptag reference with the memory (uvmm.c). */
+	if (mem->memory.tags)
+		nvkm_memory_tags_put(memory, mem->mmu->subdev.device,
+				     &mem->memory.tags);
 	if (mem->mem) {
 		while (mem->pages--) {
 			dma_unmap_page(mem->mmu->subdev.device->dev,
@@ -140,6 +145,23 @@ nvkm_mem_map_host(struct nvkm_memory *memory, void **pmap)
 	return -EINVAL;
 }
 
+/* Tegra: TTM's high-order chunks can carry 128K GPU pages (and comptags). */
+static u8
+nvkm_mem_dma_page(const dma_addr_t *dma, u64 pages)
+{
+	const u64 n = SZ_128K >> PAGE_SHIFT;
+	u64 i;
+
+	if (!pages || pages % n)
+		return PAGE_SHIFT;
+	for (i = 0; i < pages; i++) {
+		if (i % n ? dma[i] != dma[i - 1] + PAGE_SIZE :
+			    !IS_ALIGNED(dma[i], SZ_128K))
+			return PAGE_SHIFT;
+	}
+	return 17;
+}
+
 static int
 nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 		  void *argv, u32 argc, struct nvkm_memory **pmemory)
@@ -160,7 +182,8 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 	else
 		target = NVKM_MEM_TARGET_NCOH;
 
-	if (page != PAGE_SHIFT)
+	if (page != PAGE_SHIFT &&
+	    !(page == 17 && mmu->subdev.device->type == NVKM_DEVICE_TEGRA))
 		return -EINVAL;
 
 	if (!(mem = kzalloc_obj(*mem)))
@@ -181,6 +204,8 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 		if (!IS_ALIGNED(size, PAGE_SIZE))
 			return -EINVAL;
 		mem->pages = size >> PAGE_SHIFT;
+		if (args->v0.dma && page == 17)
+			mem->page = nvkm_mem_dma_page(mem->dma, mem->pages);
 		return 0;
 	} else
 	if ( (ret = nvif_unvers(ret, &argv, &argc, args->vn))) {

@@ -300,7 +300,13 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 	spin_unlock_irq(&mq->lock);
 
 	if (!(req->rq_flags & RQF_DONTPREP)) {
+		/*
+		 * The PDU is reused by later requests: clear the single-block
+		 * recovery mode with the retry count, so that one error does
+		 * not leave this tag in CMD17/CMD24 transfers for good.
+		 */
 		req_to_mmc_queue_req(req)->retries = 0;
+		req_to_mmc_queue_req(req)->flags = 0;
 		req->rq_flags |= RQF_DONTPREP;
 	}
 
