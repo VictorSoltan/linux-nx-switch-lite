@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
+/dts-v1/;
+
+#include "tegra210b01-nx.dtsi"
+
+/ {
+	model = "Nintendo Switch (OLED model)";
+	compatible = "nvidia,fric", "nintendo,aula", "nintendo,nx", "nvidia,tegra210b01";
+};
+
+&panel {
+	/delete-property/ backlight;
+	/delete-property/ vdd1-supply;
+	/delete-property/ vdd2-supply;
+};
+
+&backlight {
+	status = "disabled";
+};
